@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#eef3f8">
+  <meta name="description" content="Convert any file into a downloadable plain-text summary directly in your browser.">
+  <title>File to Text Converter</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body data-page="converter">
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand" aria-label="File to Text Converter">
+        <div class="brand-mark" aria-hidden="true">TXT</div>
+        <div class="brand-text">
+          <strong>File to Text</strong>
+          <span>local, instant, no upload</span>
+        </div>
+      </div>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="#workspace">Converter</a>
+        <a href="guide.html">Guide</a>
+      </nav>
+    </header>
+
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy panel">
+        <p class="eyebrow"><span class="dot" aria-hidden="true"></span> Browser-only file conversion</p>
+        <h1 id="hero-title">Turn any file into a clean .txt download.</h1>
+        <p class="lede">
+          Choose a file or drop one on the page. The browser builds a plain-text report locally and downloads it
+          immediately as <code class="inline-code">filename-processed.txt</code>.
+        </p>
+        <div class="tag-row" aria-label="Highlights">
+          <span class="tag"><strong>Local</strong> only</span>
+          <span class="tag"><strong>One</strong> file at a time</span>
+          <span class="tag"><strong>Auto</strong> download</span>
+        </div>
+      </div>
+
+      <aside class="hero-card" aria-label="What the text file includes">
+        <h2>What goes into the text file</h2>
+        <p>
+          Every download includes the filename, size, MIME type, and a useful representation of the file contents.
+          Text files are extracted in full. Images, PDFs, and other binary files get a structured metadata summary
+          with a byte preview.
+        </p>
+        <div class="stat-row">
+          <span class="stat-tag"><strong>Text</strong> fully extracted</span>
+          <span class="stat-tag"><strong>Images</strong> summarized</span>
+          <span class="stat-tag"><strong>Binary</strong> previewed</span>
+        </div>
+        <div class="hero-note">
+          <strong>Privacy:</strong> everything stays in your browser. Nothing is uploaded to a server.
+        </div>
+      </aside>
+    </section>
+
+    <section class="details" id="workspace" aria-labelledby="workspace-title">
+      <article class="panel">
+        <div class="panel__head">
+          <div>
+            <p class="section-kicker">1. Select</p>
+            <h2 class="section-title" id="workspace-title">Choose a file</h2>
+            <p class="section-copy">Use the button or drag and drop. The interface only processes one file at a time.</p>
+          </div>
+          <span id="fileKindBadge" class="panel__badge panel__badge--idle">Waiting</span>
+        </div>
+
+        <div
+          id="dropZone"
+          class="dropzone"
+          role="button"
+          tabindex="0"
+          aria-label="File drop zone. Press Enter or Space to browse files, or drag a file here."
+          aria-describedby="dropHelp"
+        >
+          <div class="dropzone__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path d="M7 3.5h7l4.5 4.5V20.5H7z"></path>
+              <path d="M14 3.5V8h4.5"></path>
+              <path d="M12 11v6"></path>
+              <path d="M9.5 14.5L12 17l2.5-2.5"></path>
+            </svg>
+          </div>
+          <div class="dropzone__copy">
+            <p class="dropzone__title">Drop a file here</p>
+            <p id="dropHelp" class="dropzone__text">or browse to pick a file from your device.</p>
+          </div>
+          <div class="dropzone__actions">
+            <button id="browseButton" class="ghost" type="button">Browse files</button>
+          </div>
+        </div>
+
+        <input id="fileInput" class="visually-hidden" type="file" accept="*/*" tabindex="-1">
+
+        <div id="fileSummary" class="summary" aria-live="polite" aria-atomic="true">
+          <p class="empty-state">No file selected yet.</p>
+        </div>
+      </article>
+
+      <aside class="panel panel--action" aria-labelledby="download-title">
+        <div class="panel__head">
+          <div>
+            <p class="section-kicker">2. Download</p>
+            <h2 class="section-title" id="download-title">Create the .txt file</h2>
+            <p class="section-copy">Click once. The browser downloads the result and resets the interface for the next file.</p>
+          </div>
+        </div>
+
+        <button id="generateButton" class="primary" type="button" disabled aria-describedby="outputHint">
+          Create and download .txt
+        </button>
+
+        <p class="panel__note">
+          The output will be named <code id="outputHint">filename-processed.txt</code>.
+        </p>
+        <p class="panel__note">
+          The download uses the browser's native save flow. Nothing leaves your device.
+        </p>
+      </aside>
+    </section>
+
+    <p id="status" class="status status--idle" role="status" aria-live="polite" aria-atomic="true">
+      Ready. Choose a file or drag one into the zone.
+    </p>
+  </main>
+
+  <script src="app.js" defer></script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 # py-transcribe
 
-Local audio transcription with OpenAI Whisper.
+Local audio transcription and English translation with OpenAI Whisper.
 
 Transcribe audio files on your own machine. Your audio stays local, there are no API keys to manage, and you can use the project either from Python or with the bundled Windows executable.
 
@@ -9,6 +9,7 @@ Transcribe audio files on your own machine. Your audio stays local, there are no
 - Runs locally with Whisper
 - Supports multiple model sizes: `tiny`, `base`, `small`, `medium`, `large`, `large-v2`, and `large-v3`
 - Auto-detects language, or you can force a specific one
+- Can transcribe speech or translate it to English
 - Works in interactive mode or from the command line
 - Supports drag-and-drop on Windows through the included shortcut
 - Includes a pre-built Windows `.exe` for users who do not want to install Python
@@ -43,11 +44,12 @@ You will be asked for the audio file and the output location.
 python transcribe.py "C:\audio\interview.mp3"
 python transcribe.py --input "C:\audio\interview.mp3" --output "C:\transcripts\interview.txt"
 python transcribe.py --input "C:\audio\meeting.m4a" --model medium --language en
+python transcribe.py --input "C:\audio\meeting.m4a" --task translate --language es
 ```
 
 You can provide the input file either positionally or with `--input`, but not both.
 
-If you omit `--output`, the app suggests a default transcript path next to the audio file and lets you accept it or type a different one.
+If you omit `--output`, the app suggests a default transcript or translation path next to the audio file and lets you accept it or type a different one.
 
 ## Options
 
@@ -55,9 +57,10 @@ If you omit `--output`, the app suggests a default transcript path next to the a
 | --- | --- | --- |
 | `input_file` | Optional positional audio file | Prompted |
 | `-i`, `--input` | Path to the audio file | Prompted |
-| `-o`, `--output` | Path for the transcript text file | `<input>_transcript.txt` |
+| `-o`, `--output` | Path for the transcript or translation text file | `<input>_transcript.txt` or `<input>_translation.txt` |
 | `-m`, `--model` | Whisper model size | `base` |
-| `-l`, `--language` | Language code such as `en`, `es`, or `fr` | Auto-detect |
+| `-l`, `--language` | Source language code such as `en`, `es`, or `fr` | Auto-detect |
+| `--task` | `transcribe` or `translate` to English | `transcribe` |
 | `--pause` | Wait for Enter before closing the console | Off |
 
 ## Windows
@@ -68,7 +71,7 @@ For a ready-to-run Windows build:
 2. Extract it
 3. Run `transcribe.exe` or use `transcribe.lnk`
 
-The shortcut is useful for drag-and-drop. If you drop an audio file on it, the console stays open after the transcription finishes.
+The shortcut is useful for drag-and-drop. If you drop an audio file on it, the console stays open after the transcription or translation finishes.
 
 See `windows.md` for the lightweight download landing page used by the packaged build.
 
@@ -93,11 +96,22 @@ The script creates:
 
 ## Output
 
-Each transcript is saved as plain text and includes:
+Each output file is saved as plain text and includes:
 
 - Detected language
 - Processing time
-- The transcription text itself
+- The transcription or translation text itself
+
+When you use `--task translate`, the saved file contains English translation text and the default filename changes to `<input>_translation.txt`.
+
+## Web Pages
+
+This repository also includes a static web UI in `web/`:
+
+- `web/index.html` for the local file-to-text converter
+- `web/guide.html` for the output structure and usage reference
+
+Open either page in a browser if you want a simple, browser-only workflow for turning a file into a downloadable `.txt` report.
 
 ## Troubleshooting
 

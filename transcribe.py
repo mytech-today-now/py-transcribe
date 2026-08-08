@@ -46,48 +46,63 @@ class AudioTranscriber:
         self.model = whisper.load_model(model_size)
         print("Model loaded successfully!\n")
 
-    def transcribe_file(self, audio_path, language=None):
+    def transcribe_file(self, audio_path, language=None, task="transcribe"):
         """
-        Transcribe a single audio file.
+        Transcribe or translate a single audio file.
 
         Args:
             audio_path: Path to audio file
             language: Language code ('en', 'es', 'fr', etc.) or None for auto-detect
+            task: Whisper task, either "transcribe" or "translate"
         """
         audio_path = Path(audio_path)
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-        print(f"Transcribing: {audio_path.name}")
+        action = "Translating" if task == "translate" else "Transcribing"
+        print(f"{action}: {audio_path.name}")
         start_time = time.time()
 
         options = {"language": language} if language else {}
+        if task != "transcribe":
+            options["task"] = task
         result = self.model.transcribe(str(audio_path), **options)
 
         processing_time = time.time() - start_time
         print(f"✓ Completed in {processing_time:.1f} seconds")
-        print(f"✓ Detected language: {result['language']}\n")
+        if task == "translate":
+            print(f"✓ Detected source language: {result['language']}")
+            print("✓ Translation output: English\n")
+        else:
+            print(f"✓ Detected language: {result['language']}\n")
 
         return {
             "text": result["text"].strip(),
             "language": result["language"],
+            "task": task,
             "segments": result.get("segments", []),
             "processing_time": processing_time,
         }
 
     def save_transcription(self, result, output_path):
-        """Save transcription to a text file."""
+        """Save a transcription or translation to a text file."""
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        is_translate = result.get("task") == "translate"
+        title = "Translation Results" if is_translate else "Transcription Results"
+        language_label = "Source Language" if is_translate else "Language"
+        saved_label = "Translation" if is_translate else "Transcription"
 
         with open(output_path, "w", encoding="utf-8") as f:
-            f.write("=== Transcription Results ===\n")
-            f.write(f"Language: {result['language']}\n")
+            f.write(f"=== {title} ===\n")
+            f.write(f"{language_label}: {result['language']}\n")
+            if is_translate:
+                f.write("Target Language: English\n")
             f.write(f"Processing Time: {result['processing_time']:.1f} seconds\n")
             f.write("=" * 40 + "\n\n")
             f.write(result["text"])
 
-        print(f"✓ Transcription saved to: {output_path}")
+        print(f"✓ {saved_label} saved to: {output_path}")
 
 
 def prompt_path(prompt_text, default=None, must_exist=False):
@@ -112,9 +127,10 @@ def prompt_path(prompt_text, default=None, must_exist=False):
         return path
 
 
-def get_default_output(input_path):
+def get_default_output(input_path, task="transcribe"):
     """Return default output path next to the input file."""
-    return input_path.with_name(f"{input_path.stem}_transcript.txt")
+    suffix = "translation" if task == "translate" else "transcript"
+    return input_path.with_name(f"{input_path.stem}_{suffix}.txt")
 
 
 def path_from_text(value):
@@ -125,7 +141,7 @@ def path_from_text(value):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Transcribe an audio file with OpenAI Whisper.",
+        description="Transcribe or translate an audio file with OpenAI Whisper.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -134,9 +150,10 @@ Examples:
   python transcribe.py -input "C:\\audio\\interview.mp3"
   python transcribe.py -input interview.mp3 -output "D:\\transcripts\\result.txt"
   python transcribe.py -input interview.mp3 -model medium -language en
+  python transcribe.py -input interview.mp3 --task translate -language es
 
-You can also drag an audio file onto transcribe.lnk. The transcript defaults to
-the input file's folder, and the program lets you enter a different output file.
+You can also drag an audio file onto transcribe.lnk. The output defaults to the
+input file's folder, and the program lets you enter a different output file.
         """,
     )
     parser.add_argument(
@@ -149,14 +166,14 @@ the input file's folder, and the program lets you enter a different output file.
         "-i",
         "--input",
         dest="input_path",
-        help="Path to the audio file to transcribe",
+        help="Path to the audio file",
     )
     parser.add_argument(
         "-output",
         "-o",
         "--output",
         dest="output_path",
-        help="Path for the transcript text file (default: same folder as input, with _transcript.txt)",
+        help="Path for the transcript or translation text file (default: mode-aware filename next to the input file)",
     )
     parser.add_argument(
         "-model",
@@ -173,7 +190,13 @@ the input file's folder, and the program lets you enter a different output file.
         "--language",
         dest="language",
         default=None,
-        help="Language code (e.g. en, es, fr). Leave blank for auto-detect",
+        help="Source language code (e.g. en, es, fr). Leave blank for auto-detect",
+    )
+    parser.add_argument(
+        "--task",
+        choices=["transcribe", "translate"],
+        default="transcribe",
+        help="Whisper task: transcribe audio or translate it to English",
     )
     parser.add_argument(
         "--pause",
@@ -220,7 +243,7 @@ def main_with_args(args):
             pass
 
     print("=" * 50)
-    print("  Whisper Audio Transcriber")
+    print("  Whisper Audio Transcriber / Translator")
     print("=" * 50)
     print()
 
@@ -241,13 +264,14 @@ def main_with_args(args):
         )
 
     # Resolve output path
-    default_output = get_default_output(input_path)
+    default_output = get_default_output(input_path, task=args.task)
     if args.output_path:
         output_path = path_from_text(args.output_path)
     else:
+        output_label = "translation" if args.task == "translate" else "transcript"
         print()
         use_default = input(
-            f"Save transcript next to the audio file?\n"
+            f"Save {output_label} next to the audio file?\n"
             f"  Default: {default_output}\n"
             f"  Press Enter to accept, or type a different output file: "
         ).strip().strip('"')
@@ -259,15 +283,17 @@ def main_with_args(args):
     print(f"Output: {output_path}")
     print(f"Model : {args.model_size}")
     print(f"Lang  : {args.language or 'auto-detect'}")
+    print(f"Task  : {args.task}")
     print()
 
     try:
         transcriber = AudioTranscriber(model_size=args.model_size)
-        result = transcriber.transcribe_file(input_path, language=args.language)
+        result = transcriber.transcribe_file(input_path, language=args.language, task=args.task)
         transcriber.save_transcription(result, output_path)
 
         print()
-        print("Preview (first 300 characters):")
+        preview_title = "translated text" if args.task == "translate" else "transcript"
+        print(f"Preview (first 300 characters of {preview_title}):")
         print("-" * 40)
         preview = result["text"]
         print(preview[:300] + ("..." if len(preview) > 300 else ""))

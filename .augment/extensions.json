@@ -1,0 +1,111 @@
+{
+  "version": "0.1.0",
+  "modules": [
+    {
+      "name": "coding-standards/bash",
+      "version": "1.0.0",
+      "type": "coding-standards",
+      "description": "Comprehensive Bash coding standards for professional, maintainable, and secure Bash scripts across automation, CI/CD, CLI tools, configuration, data processing, system administration, and cross-platform development."
+    },
+    {
+      "name": "coding-standards/c",
+      "version": "1.0.0",
+      "type": "coding-standards",
+      "description": "Comprehensive C programming language coding standards for systems programming, embedded systems, kernel development, device drivers, real-time systems, networking, and legacy code maintenance"
+    },
+    {
+      "name": "coding-standards/css",
+      "version": "1.0.0",
+      "type": "coding-standards",
+      "description": "Comprehensive CSS coding standards for modern web development with styling, layouts, responsiveness, and preprocessors (Sass, Less)"
+    },
+    {
+      "name": "coding-standards/html",
+      "version": "1.0.0",
+      "type": "coding-standards",
+      "description": "Comprehensive HTML coding standards for modern web development with semantic HTML, accessibility guidelines, and HTML5 features"
+    },
+    {
+      "name": "coding-standards/html-css-js",
+      "version": "1.0.0",
+      "type": "coding-standards",
+      "description": "Comprehensive HTML/CSS/JavaScript coding standards for modern web development with semantic HTML, modern CSS features, and ES6+ JavaScript"
+    },
+    {
+      "name": "coding-standards/js",
+      "version": "1.0.0",
+      "type": "coding-standards",
+      "description": "Comprehensive JavaScript coding standards for modern web development with ES6+, DOM manipulation, async patterns, and framework integration"
+    },
+    {
+      "name": "coding-standards/powershell",
+      "version": "1.0.0",
+      "type": "coding-standards",
+      "description": "Comprehensive PowerShell coding standards for professional, maintainable, and secure PowerShell code across automation, modules, DSC, cloud orchestration, administrative tools, cross-platform scripts, and legacy migrations."
+    },
+    {
+      "name": "coding-standards/python",
+      "version": "1.1.0",
+      "type": "coding-standards",
+      "description": "Comprehensive Python coding standards including naming conventions, type hints (PEP 484, 585, 604), and error handling"
+    },
+    {
+      "name": "domain-rules/mcp",
+      "version": "1.0.0",
+      "type": "domain-rules",
+      "description": "Comprehensive guidelines for designing and implementing Model Context Protocol systems including token-based, state-based, vector-based, hybrid, graph-augmented, and compressed MCP"
+    },
+    {
+      "name": "domain-rules/security",
+      "version": "1.0.0",
+      "type": "domain-rules",
+      "description": "Comprehensive security guidelines including OWASP best practices, authentication, encryption, and secure coding"
+    },
+    {
+      "name": "domain-rules/seo-sales-marketing",
+      "version": "1.0.0",
+      "type": "domain-rules",
+      "description": "Comprehensive marketing and sales content standards for AI-driven content creation"
+    },
+    {
+      "name": "domain-rules/software-architecture",
+      "version": "1.0.0",
+      "type": "domain-rules",
+      "description": "Comprehensive software architecture design patterns, principles, and best practices covering monolithic, microservices, event-driven, serverless, and industry-specific architectures"
+    },
+    {
+      "name": "examples/design-patterns",
+      "version": "1.0.0",
+      "type": "examples",
+      "description": "Common design patterns with TypeScript/JavaScript implementations and use cases"
+    },
+    {
+      "name": "examples/rest-api-plugin",
+      "version": "1.0.0",
+      "type": "examples",
+      "description": "Complete REST API plugin examples with custom endpoints (GET, POST, PUT, DELETE), authentication, validation, error handling, and JavaScript client examples"
+    },
+    {
+      "name": "visual-design",
+      "version": "1.0.0",
+      "type": "domain-rules",
+      "description": "Comprehensive visual design module with vendor-specific design systems (Google Material 3, Microsoft Fluent 2, Amazon Cloudscape) and domain-specific styles (Website, Web-app, Mobile, .NET, Linux, Windows, Motion Picture, AI Prompt Helper, Print Campaigns). Provides design elements, principles, and skills for AI-driven design generation."
+    },
+    {
+      "name": "workflows/adr-support",
+      "version": "1.0.0",
+      "type": "workflow",
+      "description": "Automatic Architecture Decision Record (ADR) management with decision detection, lifecycle tracking, templates, and integration with OpenSpec and Beads workflows"
+    },
+    {
+      "name": "workflows/database",
+      "version": "1.0.0",
+      "type": "workflow",
+      "description": "Comprehensive workflow for database design, schema development, migration management, optimization, and testing. Covers relational, NoSQL, vector, and flat databases."
+    }
+  ],
+  "settings": {
+    "autoUpdate": false,
+    "checkUpdatesOnInit": true
+  }
+}
