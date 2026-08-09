@@ -294,13 +294,120 @@ function app_build_config(array $extra = []): array
         'appName' => APP_NAME,
         'uploadEndpoint' => 'api/upload.php',
         'downloadEndpoint' => 'api/download.php',
+        'localAiBaseUrl' => 'api/ollama',
         'promoUrl' => 'https://mytech.today',
         'readmeApiUrl' => 'https://api.github.com/repos/mytech-today-now/py-transcribe/readme?ref=main',
         'readmeSourceUrl' => 'https://github.com/mytech-today-now/py-transcribe/blob/main/readme.md',
         'csrfToken' => app_csrf_token(),
         'authRequired' => app_is_auth_enabled(),
         'storageEnabled' => true,
+        'localAiAutoDownload' => true,
         'uploadLimitBytes' => app_max_upload_bytes(),
         'clientLimitBytes' => 128 * 1024 * 1024,
     ], $extra);
+}
+
+function app_proxy_ollama_endpoint(string $endpoint): void
+{
+    $endpoint = trim($endpoint);
+    $allowed = ['tags', 'pull', 'chat'];
+    if ($endpoint === '' || !in_array($endpoint, $allowed, true)) {
+        app_text('Ollama endpoint not found.', 404);
+    }
+
+    $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
+    if (!in_array($method, ['GET', 'POST'], true)) {
+        app_text('Method not allowed.', 405);
+    }
+
+    $body = $method === 'POST' ? (string) file_get_contents('php://input') : '';
+    $requestHeaders = [
+        'Accept: application/json, application/x-ndjson, text/plain;q=0.8, */*;q=0.5'
+    ];
+    if ($method === 'POST') {
+        $requestHeaders[] = 'Content-Type: application/json';
+    }
+
+    $httpOptions = [
+        'method' => $method,
+        'header' => implode("\r\n", $requestHeaders) . "\r\n",
+        'ignore_errors' => true,
+        'timeout' => 3600
+    ];
+    if ($method === 'POST') {
+        $httpOptions['content'] = $body;
+    }
+
+    $context = stream_context_create([
+        'http' => $httpOptions
+    ]);
+
+    @set_time_limit(0);
+    while (ob_get_level() > 0) {
+        @ob_end_flush();
+    }
+    @ob_implicit_flush(true);
+
+    $target = 'http://localhost:11434/api/' . $endpoint;
+    $stream = @fopen($target, 'rb', false, $context);
+    if ($stream === false) {
+        app_text('Ollama is not running on this machine or the local proxy cannot reach http://localhost:11434.', 502);
+    }
+
+    $responseHeaders = $http_response_header ?? [];
+    $status = app_parse_http_status_code($responseHeaders) ?? 502;
+    $contentType = app_http_header_value($responseHeaders, 'Content-Type');
+    if ($contentType === null || $contentType === '') {
+        $contentType = $endpoint === 'tags'
+            ? 'application/json; charset=utf-8'
+            : 'application/x-ndjson; charset=utf-8';
+    }
+
+    http_response_code($status);
+    header('Cache-Control: no-store');
+    header('X-Accel-Buffering: no');
+    header('Content-Type: ' . $contentType);
+
+    while (!feof($stream)) {
+        $chunk = fread($stream, 8192);
+        if ($chunk === false) {
+            break;
+        }
+
+        if ($chunk === '') {
+            continue;
+        }
+
+        echo $chunk;
+        flush();
+    }
+
+    fclose($stream);
+    exit;
+}
+
+function app_parse_http_status_code(array $headers): ?int
+{
+    foreach ($headers as $header) {
+        if (preg_match('/^HTTP\/\S+\s+(\d{3})\b/i', (string) $header, $matches)) {
+            return (int) $matches[1];
+        }
+    }
+
+    return null;
+}
+
+function app_http_header_value(array $headers, string $name): ?string
+{
+    $prefix = strtolower(trim($name)) . ':';
+    foreach ($headers as $header) {
+        $line = strtolower(trim((string) $header));
+        if (strpos($line, $prefix) !== 0) {
+            continue;
+        }
+
+        return trim(substr((string) $header, strlen($prefix)));
+    }
+
+    return null;
 }

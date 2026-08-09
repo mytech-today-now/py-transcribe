@@ -7,7 +7,7 @@ test.describe('Runtime loading', () => {
     await loadRuntime(page);
 
     await expect(page.locator('#status')).toContainText(/pyodide and base whisper are ready/i);
-    await expect(page.locator('#loadRuntimeButton')).toHaveText('Reload Whisper / Python');
+    await expect(page.locator('#loadRuntimeButton')).toHaveText('Load Whisper / Python');
     await expect(page.locator('#runtimeBadge')).toHaveText('Loaded');
     await expect(page.locator('#runtimeState')).toHaveText('Base ready');
     await expect(page.locator('#runtimeDetail')).toContainText('Whisper is ready');
@@ -23,7 +23,7 @@ test.describe('Runtime loading', () => {
 
     await expect(page.locator('#status')).toContainText(/failed to load runtime/i);
     await expect(page.locator('#runtimeBadge')).toHaveText('Idle');
-    await expect(page.locator('#loadRuntimeButton')).toHaveText('Reload Whisper / Python');
+    await expect(page.locator('#loadRuntimeButton')).toHaveText('Load Whisper / Python');
 
     await page.evaluate(() => {
       window.__pyTranscribeTestState.config.whisperMode = 'ready';

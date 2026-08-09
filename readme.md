@@ -155,12 +155,14 @@ package.json
 ## Usage
 
 1. Open the app in a modern browser.
-2. Click `Reload Whisper / Python`.
+2. Click `Load Whisper / Python`.
 3. Drop a file, click the drop zone to browse for one, or use `Record Mic` to capture audio from the microphone.
 4. Review a recording in the embedded player if you captured one.
 5. Pick the model, language, task, and cleanup options.
 6. Click `Transcribe`.
 7. Edit the transcript and download TXT, SRT, VTT, or ZIP outputs.
+
+> The app saves settings, the selected file, and transcript data in browser storage on supported browsers, so a refresh should restore the session instead of resetting it.
 
 ## Limitations
 

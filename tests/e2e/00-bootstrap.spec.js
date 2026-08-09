@@ -11,7 +11,7 @@ test.describe('Bootstrap', () => {
     await expect(page.locator('#browserNote')).toContainText('Everything stays local');
     await expect(page.locator('#runtimeState')).toHaveText('Not loaded');
     await expect(page.locator('#fileState')).toHaveAttribute('hidden', '');
-    await expect(page.getByRole('button', { name: 'Reload Whisper / Python' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Load Whisper / Python' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Transcribe' })).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Record Mic' })).toBeVisible();
   });
@@ -22,6 +22,6 @@ test.describe('Bootstrap', () => {
     await expect(page.locator('#recordButton')).toBeVisible();
     await expect(page.locator('#recordingState')).toHaveText('Mic idle');
     await expect(page.locator('#transcribeButton')).toBeDisabled();
-    await expect(page.locator('#status')).toHaveText(/ready\. reload whisper, then choose a file\./i);
+    await expect(page.locator('#status')).toHaveText(/ready\. load whisper \/ python, then choose a file\./i);
   });
 });

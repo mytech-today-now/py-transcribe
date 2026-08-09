@@ -24,8 +24,30 @@ import {
   buildWhisperTranscriptionRequest,
   isEnglishOnlyWhisperModel
 } from './lib/whisper.js';
+import {
+  OLLAMA_DEFAULT_BASE_URL,
+  fetchOllamaModels,
+  fetchOllamaModelsFromCandidates,
+  chatWithOllama,
+  describeLocalAiError,
+  LOCAL_AI_PULL_CANDIDATES,
+  pullOllamaModelWithProgress,
+  resolveBestKimiModel,
+  resolvePreferredKimiPullCandidate,
+  resolveOllamaBaseUrlCandidates,
+  shouldAttemptLocalAiDetection,
+  summarizeWithOllama,
+  LOCAL_AI_DETAIL_LEVELS,
+  normalizeLocalAiDetailLevel,
+  normalizeLocalAiModelName
+} from './lib/local-ai.js';
 import JSZip from './lib/jszip.js';
 import { createWorkerClient } from './lib/worker-rpc.js';
+import {
+  readPersistedSession,
+  requestPersistentStorage,
+  writePersistedSession
+} from './lib/persistence.js';
 import whisperWorkerUrl from './workers/transcribe-worker.js?worker&url';
 import formatterWorkerUrl from './workers/python-worker.js?worker&url';
 
@@ -67,8 +89,19 @@ const LANGUAGE_OPTIONS = [
 ];
 
 const STORAGE_KEY = 'py-transcribe:shared-hosting-state';
+const SESSION_FALLBACK_KEY = 'py-transcribe:shared-hosting-session';
 const DEFAULT_CLIENT_LIMIT = 128 * 1024 * 1024;
 const DEFAULT_SERVER_LIMIT = 16 * 1024 * 1024;
+const LOCAL_AI_CHAT_HISTORY_LIMIT = 16;
+const OLLAMA_DOWNLOAD_URL = 'https://ollama.com/download';
+const LOCAL_AI_STATUS_MESSAGES = {
+  idle: 'Ollama detected',
+  checking: 'Checking Ollama...',
+  downloading: 'Downloading Kimi model...',
+  ready: 'Model ready',
+  summarizing: 'Summarizing...',
+  unavailable: 'Local AI unavailable'
+};
 
 const state = {
   config: readConfig(),
@@ -112,6 +145,48 @@ const state = {
   transcriptNotice: '',
   serverBackup: null,
   serverBackupNotice: '',
+  localAi: {
+    supported: shouldAttemptLocalAiDetection(),
+    available: false,
+    status: 'idle',
+    message: '',
+    detail: '',
+    baseUrl: '',
+    modelName: '',
+    progress: null,
+    progressText: '',
+    checking: false,
+    pulling: false,
+    summarizing: false,
+    installedModels: [],
+    summaryText: '',
+    summaryExpanded: false,
+    summaryDirty: false,
+    summaryWarning: '',
+    summarySourceChars: 0,
+    summaryDetailLevel: 'standard',
+    summaryModelName: '',
+    summaryContextSignature: '',
+    summaryError: '',
+    checkRequestId: 0,
+    summarizeRequestId: 0,
+    chatRequestId: 0,
+    activeController: null,
+    lastSuccessfulCheckAt: '',
+    cachedModelName: '',
+    chat: {
+      messages: [],
+      draft: '',
+      sending: false,
+      status: 'idle',
+      message: '',
+      detail: '',
+      error: '',
+      stale: false,
+      contextSignature: '',
+      requestId: 0
+    }
+  },
   readme: {
     status: 'idle',
     html: '',
@@ -124,19 +199,38 @@ const state = {
 
 let modalScrollLockY = 0;
 let modalScrollLockActive = false;
+let sessionPersistTimerId = 0;
+let sessionPersistPending = false;
+let sessionPersistWritePromise = Promise.resolve();
+let restoreRuntimeAfterHydration = false;
+let lastPersistedSettings = '';
 
 const refs = {};
 
 document.addEventListener('DOMContentLoaded', bootstrap);
 
-function bootstrap() {
+async function bootstrap() {
   bindRefs();
   populateSelectors();
-  hydrateFromStorage();
   registerEvents();
   registerServiceWorker();
+  void requestPersistentStorage();
+  setStatus('Restoring saved session...');
+  await hydrateFromStorage();
   renderAll();
-  setStatus('Ready. Reload Whisper, then choose a file.');
+  const shouldRestoreRuntime = restoreRuntimeAfterHydration;
+  setStatus(shouldRestoreRuntime
+    ? 'Restoring Whisper / Python from storage...'
+    : state.runtimeReady
+      ? 'Ready. Your saved Whisper session is active.'
+      : 'Ready. Load Whisper / Python, then choose a file.');
+  void initializeLocalAi({
+    forceRefresh: state.localAi.supported && state.config.localAiAutoDownload !== false
+  });
+  if (shouldRestoreRuntime && !state.runtimeReady && !state.runtimeLoading) {
+    restoreRuntimeAfterHydration = false;
+    void loadRuntime();
+  }
 }
 
 function bindRefs() {
@@ -159,6 +253,11 @@ function bindRefs() {
     'downloadVttButton',
     'downloadZipButton',
     'copyButton',
+    'aiModelSelect',
+    'aiModelMeta',
+    'checkAiButton',
+    'summarizeButton',
+    'cancelAiButton',
     'dropZone',
     'fileInput',
     'fileBadge',
@@ -181,6 +280,31 @@ function bindRefs() {
     'transcriptEditor',
     'timedPreview',
     'serverBackupState',
+    'aiState',
+    'aiDetail',
+    'aiProgress',
+    'aiProgressBar',
+    'aiProgressText',
+    'summaryPanel',
+    'summaryPanelTitle',
+    'summaryMeta',
+    'summaryContent',
+    'summaryCopyButton',
+    'summaryExpandButton',
+    'summaryDismissButton',
+    'summaryDetailBrief',
+    'summaryDetailStandard',
+    'summaryDetailDetailed',
+    'chatPanel',
+    'chatPanelTitle',
+    'chatMeta',
+    'chatStatus',
+    'chatHistory',
+    'chatForm',
+    'chatInput',
+    'chatSendButton',
+    'chatNewSessionButton',
+    'chatClearButton',
     'promoDialog',
     'readmeDialog',
     'readmeStatus',
@@ -214,11 +338,15 @@ function populateSelectors() {
   refs.speakerOne.value = state.settings.speakerNames[0];
   refs.speakerTwo.value = state.settings.speakerNames[1];
   refs.serverCopyToggle.checked = Boolean(state.settings.serverCopy);
+  refs.summaryDetailBrief.checked = state.settings.summaryDetail === 'brief';
+  refs.summaryDetailStandard.checked = state.settings.summaryDetail === 'standard';
+  refs.summaryDetailDetailed.checked = state.settings.summaryDetail === 'detailed';
   refs.speakerNames.hidden = !state.settings.speakerMode;
   const dictationSupported = supportsDictation();
   refs.dictateButton.hidden = !dictationSupported;
   refs.dictateButton.parentElement.hidden = !dictationSupported;
   refs.cancelButton.hidden = true;
+  refs.cancelAiButton.hidden = true;
   refs.recordButton.textContent = 'Record Mic';
   refs.recordButton.setAttribute('aria-pressed', 'false');
   refs.dictateButton.textContent = dictationSupported ? 'Dictate Mic' : 'Dictation unavailable';
@@ -316,6 +444,71 @@ function registerEvents() {
     void downloadZip();
   });
 
+  refs.aiModelSelect.addEventListener('change', () => {
+    updateLocalAiModelSelection(refs.aiModelSelect.value);
+  });
+
+  refs.checkAiButton.addEventListener('click', () => {
+    void initializeLocalAi({ forceRefresh: true });
+  });
+
+  refs.summarizeButton.addEventListener('click', () => {
+    void summarizeCurrentTranscript();
+  });
+
+  refs.cancelAiButton.addEventListener('click', () => {
+    cancelLocalAiWork();
+  });
+
+  refs.summaryCopyButton.addEventListener('click', () => {
+    void copySummary();
+  });
+
+  refs.summaryExpandButton.addEventListener('click', () => {
+    toggleSummaryExpanded();
+  });
+
+  refs.summaryDismissButton.addEventListener('click', () => {
+    dismissSummary();
+  });
+
+  refs.chatForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void sendChatMessage();
+  });
+
+  refs.chatInput.addEventListener('input', () => {
+    state.localAi.chat.draft = refs.chatInput.value;
+    persistSessionDraft();
+    renderLocalAiState();
+  });
+
+  refs.chatNewSessionButton.addEventListener('click', () => {
+    startLocalChatSession();
+  });
+
+  refs.chatClearButton.addEventListener('click', () => {
+    clearLocalChatSession();
+  });
+
+  refs.summaryDetailBrief.addEventListener('change', () => {
+    if (refs.summaryDetailBrief.checked) {
+      setSummaryDetail('brief');
+    }
+  });
+
+  refs.summaryDetailStandard.addEventListener('change', () => {
+    if (refs.summaryDetailStandard.checked) {
+      setSummaryDetail('standard');
+    }
+  });
+
+  refs.summaryDetailDetailed.addEventListener('change', () => {
+    if (refs.summaryDetailDetailed.checked) {
+      setSummaryDetail('detailed');
+    }
+  });
+
   refs.modelSelect.addEventListener('change', () => {
     state.settings.modelKey = refs.modelSelect.value;
     state.runtimeDirty = true;
@@ -323,8 +516,9 @@ function registerEvents() {
     syncWhisperModelControls();
     persistSettings();
     updateRuntimeButtonLabel();
-    setStatus('Model changed. Reload Whisper to apply the new runtime.');
+    setStatus('Model changed. Loading the new runtime...');
     renderAll();
+    void loadRuntime();
   });
 
   refs.taskSelect.addEventListener('change', () => {
@@ -384,14 +578,30 @@ function registerEvents() {
 
   refs.transcriptEditor.addEventListener('input', () => {
     state.transcriptText = refs.transcriptEditor.value;
-    state.outputs.txt = state.transcriptText;
+    state.outputs = {
+      txt: state.transcriptText,
+      srt: '',
+      vtt: '',
+      preview: ''
+    };
+    markSummaryDirty();
+    renderLocalAiState();
     updateTranscriptPreview();
+    persistSettings();
     persistSessionDraft();
     renderDownloadState();
   });
 
   bindDialogDismiss(refs.promoDialog);
   bindDialogDismiss(refs.readmeDialog);
+  window.addEventListener('pagehide', () => {
+    cancelLocalAiWork({ silent: true });
+    persistSessionDraft({ immediate: true });
+  });
+  window.addEventListener('beforeunload', () => {
+    cancelLocalAiWork({ silent: true });
+    persistSessionDraft({ immediate: true });
+  });
   syncModalScrollLock();
 }
 
@@ -414,7 +624,7 @@ function bindDialogDismiss(dialog) {
 }
 
 function updateRuntimeButtonLabel() {
-  refs.loadRuntimeButton.textContent = 'Reload Whisper / Python';
+  refs.loadRuntimeButton.textContent = 'Load Whisper / Python';
 }
 
 function transcriptPreviewText() {
@@ -435,6 +645,1104 @@ function updateDownloadLabels() {
   refs.downloadSrtButton.textContent = `Download ${suffix}.srt`;
   refs.downloadVttButton.textContent = `Download ${suffix}.vtt`;
   refs.downloadZipButton.textContent = `Download ${suffix}.zip`;
+}
+
+function normalizeLocalAiText(value) {
+  return String(value || '').replace(/\r\n/g, '\n').trim();
+}
+
+function buildLocalAiTextSignature(...parts) {
+  let hash = 0x811c9dc5;
+  for (const part of parts) {
+    const text = String(part || '').replace(/\r\n/g, '\n');
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+
+    hash ^= 0x1f;
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return (hash >>> 0).toString(36);
+}
+
+function buildLocalAiContextSignature(transcriptText, summaryText) {
+  return buildLocalAiTextSignature(transcriptText, '\u0000', summaryText);
+}
+
+function sanitizeLocalAiChatMessages(messages) {
+  if (!Array.isArray(messages) || !messages.length) {
+    return [];
+  }
+
+  return messages
+    .filter((entry) => entry && typeof entry === 'object')
+    .map((entry) => ({
+      role: String(entry.role || '').toLowerCase(),
+      content: normalizeLocalAiText(entry.content),
+      pending: Boolean(entry.pending),
+      error: Boolean(entry.error)
+    }))
+    .filter((entry) => (entry.role === 'user' || entry.role === 'assistant') && entry.content && !entry.pending)
+    .slice(-LOCAL_AI_CHAT_HISTORY_LIMIT)
+    .map(({ role, content, error }) => ({
+      role,
+      content,
+      ...(error ? { error: true } : {})
+    }));
+}
+
+function isInstalledLocalAiModel(modelName) {
+  const normalized = normalizeLocalAiText(modelName).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return state.localAi.installedModels.some((model) => normalizeLocalAiModelName(model).toLowerCase() === normalized);
+}
+
+function isLocalAiPullCandidate(modelName) {
+  const normalized = normalizeLocalAiText(modelName).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return LOCAL_AI_PULL_CANDIDATES.some((candidate) => candidate.name.toLowerCase() === normalized);
+}
+
+function formatLocalAiModelLabel(model) {
+  const name = normalizeLocalAiModelName(model);
+  if (!name) {
+    return 'Unnamed model';
+  }
+
+  const details = [];
+  const family = String(model?.details?.family || '').trim();
+  const parameterSize = String(model?.details?.parameter_size || '').trim();
+
+  if (family) {
+    details.push(family);
+  }
+  if (parameterSize) {
+    details.push(parameterSize);
+  }
+
+  return details.length ? `${name} · ${details.join(' · ')}` : name;
+}
+
+function renderLocalAiModelSelect() {
+  if (!refs.aiModelSelect) {
+    return;
+  }
+
+  const selectedModelName = normalizeLocalAiText(state.localAi.modelName || state.settings.localAiModelName);
+  const installedModels = [];
+  const seen = new Set();
+
+  for (const model of state.localAi.installedModels) {
+    const modelName = normalizeLocalAiModelName(model);
+    if (!modelName || seen.has(modelName.toLowerCase())) {
+      continue;
+    }
+    seen.add(modelName.toLowerCase());
+    installedModels.push({
+      name: modelName,
+      label: formatLocalAiModelLabel(model)
+    });
+  }
+
+  const installedNames = new Set(installedModels.map((model) => model.name.toLowerCase()));
+  const candidateModels = LOCAL_AI_PULL_CANDIDATES
+    .filter((candidate) => !installedNames.has(candidate.name.toLowerCase()))
+    .map((candidate) => ({
+      name: candidate.name,
+      label: `${candidate.label} (download)`
+    }));
+
+  const fragment = document.createDocumentFragment();
+
+  if (installedModels.length) {
+    const installedGroup = document.createElement('optgroup');
+    installedGroup.label = 'Installed models';
+    for (const model of installedModels) {
+      const option = document.createElement('option');
+      option.value = model.name;
+      option.textContent = model.label;
+      option.selected = model.name.toLowerCase() === selectedModelName.toLowerCase();
+      installedGroup.appendChild(option);
+    }
+    fragment.appendChild(installedGroup);
+  } else {
+    const selectedIsCandidate = Boolean(selectedModelName)
+      && candidateModels.some((candidate) => candidate.name.toLowerCase() === selectedModelName.toLowerCase());
+    const option = document.createElement('option');
+    option.value = selectedIsCandidate ? '' : (selectedModelName || '');
+    option.textContent = selectedModelName && !selectedIsCandidate
+      ? `${selectedModelName} (selected, not installed)`
+      : 'No Kimi models installed yet';
+    option.selected = !selectedIsCandidate;
+    option.disabled = !selectedModelName || selectedIsCandidate;
+    fragment.appendChild(option);
+  }
+
+  if (selectedModelName && !installedNames.has(selectedModelName.toLowerCase()) && !candidateModels.some((candidate) => candidate.name.toLowerCase() === selectedModelName.toLowerCase())) {
+    const customOption = document.createElement('option');
+    customOption.value = selectedModelName;
+    customOption.textContent = `${selectedModelName} (selected, not installed)`;
+    customOption.selected = true;
+    fragment.insertBefore(customOption, fragment.firstChild);
+  }
+
+  if (candidateModels.length) {
+    const candidateGroup = document.createElement('optgroup');
+    candidateGroup.label = 'Kimi downloads';
+    for (const candidate of candidateModels) {
+      const option = document.createElement('option');
+      option.value = candidate.name;
+      option.textContent = candidate.label;
+      option.selected = candidate.name.toLowerCase() === selectedModelName.toLowerCase();
+      candidateGroup.appendChild(option);
+    }
+    fragment.appendChild(candidateGroup);
+  }
+
+  refs.aiModelSelect.replaceChildren(fragment);
+  refs.aiModelSelect.value = selectedModelName || refs.aiModelSelect.value || '';
+
+  if (refs.aiModelMeta) {
+    const installedCount = installedModels.length;
+    const selectedLabel = selectedModelName
+      ? (installedNames.has(selectedModelName.toLowerCase())
+        ? `Selected ${selectedModelName} is installed.`
+        : `${selectedModelName} is not installed yet.`)
+      : 'Choose an installed model or download the latest Kimi variant.';
+    refs.aiModelMeta.textContent = installedCount
+      ? `${selectedLabel} ${installedCount.toLocaleString()} installed model${installedCount === 1 ? '' : 's'} available.`
+      : selectedLabel;
+  }
+}
+
+function syncLocalAiChatContext() {
+  const transcriptText = normalizeLocalAiText(refs.transcriptEditor.value || state.transcriptText);
+  const summaryText = normalizeLocalAiText(state.localAi.summaryText);
+  const currentSignature = buildLocalAiContextSignature(transcriptText, summaryText);
+  const chat = state.localAi.chat;
+  const sessionHasDraft = Boolean(normalizeLocalAiText(chat.draft));
+  const sessionHasMessages = chat.messages.length > 0;
+
+  if (!chat.contextSignature && transcriptText) {
+    chat.contextSignature = currentSignature;
+  }
+
+  const contextChanged = Boolean(chat.contextSignature && chat.contextSignature !== currentSignature);
+  chat.stale = contextChanged && (sessionHasMessages || sessionHasDraft);
+  if (!chat.stale && !sessionHasMessages && !sessionHasDraft && transcriptText) {
+    chat.contextSignature = currentSignature;
+  }
+
+  if (chat.stale) {
+    chat.status = 'stale';
+    chat.message = 'This chat session is out of date.';
+    chat.detail = 'Start a new session to anchor the current transcript and summary.';
+  } else if (chat.sending) {
+    chat.status = 'thinking';
+    chat.message = 'Thinking...';
+    chat.detail = 'Ollama is streaming a reply locally.';
+  } else if (chat.error) {
+    chat.status = 'error';
+    chat.message = 'Chat failed.';
+    chat.detail = chat.error;
+  } else if (sessionHasMessages) {
+    chat.status = 'ready';
+    chat.message = 'Conversation ready.';
+    chat.detail = state.localAi.summaryText
+      ? 'This chat is anchored to the current transcript and summary.'
+      : 'This chat is anchored to the current transcript.';
+  } else if (transcriptText) {
+    chat.status = 'ready';
+    chat.message = 'Ask a follow-up question.';
+    chat.detail = state.localAi.summaryText
+      ? 'The current transcript and summary are fixed context for this session.'
+      : 'The current transcript is fixed context for this session.';
+  } else {
+    chat.status = 'idle';
+    chat.message = 'Add a transcript to start chatting.';
+    chat.detail = 'Chat becomes available after a transcript exists.';
+  }
+
+  return {
+    transcriptText,
+    summaryText,
+    currentSignature
+  };
+}
+
+function updateLocalAiModelSelection(modelName, { persist = true } = {}) {
+  const nextModelName = normalizeLocalAiText(modelName);
+  if (nextModelName) {
+    state.localAi.modelName = nextModelName;
+    state.settings.localAiModelName = nextModelName;
+    state.localAi.cachedModelName = nextModelName;
+  }
+
+  const installed = isInstalledLocalAiModel(state.localAi.modelName);
+  state.localAi.available = installed;
+  state.localAi.status = installed ? 'ready' : 'idle';
+  state.localAi.message = installed
+    ? LOCAL_AI_STATUS_MESSAGES.ready
+    : LOCAL_AI_STATUS_MESSAGES.idle;
+  state.localAi.detail = installed
+    ? `Using ${state.localAi.modelName} for summaries and chat.`
+    : state.localAi.modelName
+      ? `Selected ${state.localAi.modelName} is not installed yet. Click Download selected model to pull it from Ollama.`
+      : 'Choose an installed model or download the latest Kimi variant.';
+  state.localAi.summaryError = '';
+  state.localAi.chat.error = '';
+
+  if (persist) {
+    persistSettings();
+    renderAll();
+  }
+}
+
+function renderLocalAiState() {
+  if (!refs.aiState || !refs.summaryPanel) {
+    return;
+  }
+
+  const transcriptState = syncLocalAiChatContext();
+  const transcriptPresent = Boolean(normalizeLocalAiText(transcriptState.transcriptText));
+  const isWorking = state.localAi.checking || state.localAi.pulling || state.localAi.summarizing || state.localAi.chat.sending;
+  const hasSummary = Boolean(state.localAi.summaryText);
+  const hasError = Boolean(state.localAi.summaryError);
+  const shouldShowSummary = hasSummary || hasError;
+  const detailLevel = LOCAL_AI_DETAIL_LEVELS[selectedSummaryDetail()];
+  const selectedModelName = normalizeLocalAiText(state.localAi.modelName || state.settings.localAiModelName);
+  const modelIsInstalled = selectedModelName ? isInstalledLocalAiModel(selectedModelName) : false;
+  const summarySignature = state.localAi.summaryContextSignature || '';
+  const transcriptSignature = buildLocalAiTextSignature(transcriptState.transcriptText);
+
+  state.localAi.summaryDirty = Boolean(hasSummary && summarySignature && summarySignature !== transcriptSignature);
+  const summaryIsStale = Boolean(state.localAi.summaryText && state.localAi.summaryDirty);
+  if (summaryIsStale) {
+    state.localAi.chat.stale = true;
+    state.localAi.chat.status = 'stale';
+    state.localAi.chat.message = 'Summary is out of date.';
+    state.localAi.chat.detail = 'Regenerate the summary before starting a chat session.';
+  }
+
+  refs.aiState.textContent = state.localAi.message || (state.localAi.supported ? 'Not checked yet' : LOCAL_AI_STATUS_MESSAGES.unavailable);
+  refs.aiDetail.textContent = state.localAi.detail || (state.localAi.supported
+    ? 'Check Ollama to download the latest Kimi model.'
+    : `Install Ollama from ${OLLAMA_DOWNLOAD_URL} to enable summaries and chat.`);
+  renderLocalAiModelSelect();
+  refs.checkAiButton.textContent = state.localAi.status === 'unavailable'
+    ? 'Retry Ollama'
+    : state.localAi.checking
+    ? 'Checking...'
+    : state.localAi.pulling
+      ? 'Downloading...'
+      : modelIsInstalled
+        ? 'Refresh local AI'
+        : selectedModelName && isLocalAiPullCandidate(selectedModelName)
+          ? 'Download selected model'
+          : 'Download latest Kimi model';
+  refs.checkAiButton.disabled = !state.localAi.supported || isWorking;
+  refs.summarizeButton.textContent = state.localAi.summarizing ? 'Summarizing...' : 'Summarize transcript';
+  refs.summarizeButton.disabled = !state.localAi.supported
+    || !state.localAi.available
+    || !state.localAi.modelName
+    || !transcriptPresent
+    || isWorking;
+  refs.cancelAiButton.hidden = !isWorking;
+  refs.cancelAiButton.disabled = !isWorking;
+  refs.aiProgress.hidden = !state.localAi.pulling;
+
+  if (state.localAi.pulling) {
+    const progressValue = Number(state.localAi.progress);
+    if (Number.isFinite(progressValue)) {
+      refs.aiProgressBar.value = Math.max(0, Math.min(100, progressValue));
+    } else {
+      refs.aiProgressBar.removeAttribute('value');
+    }
+    refs.aiProgressText.textContent = state.localAi.progressText || 'Downloading Kimi model...';
+  } else {
+    refs.aiProgressBar.removeAttribute('value');
+    refs.aiProgressText.textContent = state.localAi.progressText || state.localAi.detail || '';
+  }
+
+  refs.summaryDetailBrief.disabled = isWorking;
+  refs.summaryDetailStandard.disabled = isWorking;
+  refs.summaryDetailDetailed.disabled = isWorking;
+
+  refs.summaryPanel.hidden = !shouldShowSummary;
+  refs.summaryPanel.classList.toggle('is-dirty', state.localAi.summaryDirty);
+  refs.summaryPanel.classList.toggle('is-expanded', Boolean(state.localAi.summaryExpanded));
+  refs.summaryPanel.classList.toggle('has-error', hasError);
+  refs.summaryPanelTitle.textContent = hasError
+    ? 'Summary unavailable'
+    : state.localAi.summaryDirty
+      ? 'Summary out of date'
+      : 'Local AI summary';
+  refs.summaryMeta.textContent = hasError
+    ? 'Check Ollama and try again.'
+    : hasSummary
+      ? [
+          state.localAi.summaryModelName ? `Model: ${state.localAi.summaryModelName}` : '',
+          `${LOCAL_AI_DETAIL_LEVELS[state.localAi.summaryDetailLevel || selectedSummaryDetail()]?.label || 'Standard'} detail`,
+          state.localAi.summarySourceChars ? `${state.localAi.summarySourceChars.toLocaleString()} transcript chars` : '',
+          state.localAi.summaryWarning || '',
+          state.localAi.summaryDirty ? 'Transcript changed since this summary was generated.' : ''
+        ].filter(Boolean).join(' · ')
+      : state.localAi.summaryDirty
+        ? 'Transcript changed since this summary was generated.'
+        : '';
+  refs.summaryContent.textContent = hasError
+    ? state.localAi.summaryError
+    : hasSummary
+      ? state.localAi.summaryText
+      : 'No summary yet.';
+  refs.summaryContent.classList.toggle('is-empty', !hasSummary && !hasError);
+  refs.summaryContent.classList.toggle('is-collapsed', hasSummary && !state.localAi.summaryExpanded);
+  refs.summaryExpandButton.hidden = !hasSummary;
+  refs.summaryExpandButton.disabled = !hasSummary;
+  refs.summaryExpandButton.textContent = state.localAi.summaryExpanded ? 'Collapse' : 'Expand';
+  refs.summaryCopyButton.disabled = !hasSummary;
+  refs.summaryDismissButton.disabled = !hasSummary && !hasError && !state.localAi.summaryDirty;
+  refs.checkAiButton.title = modelIsInstalled
+    ? 'Refresh the installed Kimi model list from Ollama.'
+    : selectedModelName && isLocalAiPullCandidate(selectedModelName)
+      ? 'Download the selected Kimi model from Ollama.'
+      : state.localAi.status === 'unavailable'
+        ? `Retry Ollama after installing it from ${OLLAMA_DOWNLOAD_URL} on this desktop browser.`
+        : 'Check Ollama and download the latest Kimi model.';
+  refs.summarizeButton.title = transcriptPresent
+    ? `${detailLevel.label} summaries stay local to this browser.`
+    : 'Add a transcript before summarizing.';
+
+  refs.aiModelSelect.disabled = isWorking || !state.localAi.supported;
+  refs.chatPanel.hidden = !transcriptPresent;
+  refs.chatPanelTitle.textContent = state.localAi.chat.stale ? 'Chat session out of date' : 'Local transcript chat';
+  refs.chatMeta.textContent = transcriptPresent
+    ? (summaryIsStale
+      ? 'Regenerate the summary before chatting.'
+      : state.localAi.summaryText
+        ? 'Chat uses the current transcript and summary as fixed context.'
+        : 'Chat uses the current transcript as fixed context.')
+    : 'Add a transcript before chatting.';
+  refs.chatStatus.textContent = state.localAi.chat.message || (state.localAi.chat.stale
+    ? 'This session is out of date.'
+    : transcriptPresent
+      ? 'Ask a follow-up question about the transcript.'
+      : 'Add a transcript to start chatting.');
+  refs.chatInput.value = state.localAi.chat.draft || '';
+  refs.chatInput.disabled = !transcriptPresent || isWorking || state.localAi.chat.stale || summaryIsStale || !state.localAi.available || !state.localAi.modelName;
+  refs.chatSendButton.disabled = !transcriptPresent
+    || isWorking
+    || state.localAi.chat.stale
+    || summaryIsStale
+    || !state.localAi.chat.draft.trim()
+    || !state.localAi.available
+    || !state.localAi.modelName;
+  refs.chatNewSessionButton.disabled = !transcriptPresent || isWorking || summaryIsStale;
+  refs.chatClearButton.disabled = isWorking || (!state.localAi.chat.messages.length && !normalizeLocalAiText(state.localAi.chat.draft));
+  refs.chatPanel.classList.toggle('is-stale', state.localAi.chat.stale || summaryIsStale);
+  refs.chatPanel.classList.toggle('has-history', state.localAi.chat.messages.length > 0);
+  refs.chatPanel.classList.toggle('is-working', state.localAi.chat.sending);
+  refs.chatPanel.classList.toggle('has-error', Boolean(state.localAi.chat.error));
+
+  const chatItems = [];
+  if (state.localAi.chat.messages.length) {
+    state.localAi.chat.messages.forEach((entry, index) => {
+      const item = document.createElement('li');
+      item.className = `chat-message chat-message--${entry.role}`;
+      if (entry.pending) {
+        item.classList.add('is-pending');
+      }
+      if (entry.error) {
+        item.classList.add('is-error');
+      }
+      item.dataset.role = entry.role;
+      item.dataset.index = String(index);
+
+      const label = document.createElement('p');
+      label.className = 'chat-message-label';
+      label.textContent = entry.role === 'user' ? 'You' : 'Assistant';
+
+      const body = document.createElement('p');
+      body.className = 'chat-message-body';
+      body.textContent = entry.content || (entry.pending ? 'Thinking...' : '');
+
+      item.append(label, body);
+      chatItems.push(item);
+    });
+  } else {
+    const item = document.createElement('li');
+    item.className = 'chat-empty';
+    item.textContent = transcriptPresent
+      ? 'Ask about decisions, names, action items, or missing context.'
+      : 'Add a transcript to start a chat session.';
+    chatItems.push(item);
+  }
+  refs.chatHistory.replaceChildren(...chatItems);
+  if (state.localAi.chat.sending || state.localAi.chat.messages.length > 0) {
+    refs.chatHistory.scrollTop = refs.chatHistory.scrollHeight;
+  }
+}
+
+function selectedSummaryDetail() {
+  if (refs.summaryDetailBrief.checked) {
+    return 'brief';
+  }
+
+  if (refs.summaryDetailDetailed.checked) {
+    return 'detailed';
+  }
+
+  return 'standard';
+}
+
+function setSummaryDetail(detailLevel, { persist = true } = {}) {
+  const normalized = normalizeLocalAiDetailLevel(detailLevel);
+  refs.summaryDetailBrief.checked = normalized === 'brief';
+  refs.summaryDetailStandard.checked = normalized === 'standard';
+  refs.summaryDetailDetailed.checked = normalized === 'detailed';
+  state.settings.summaryDetail = normalized;
+  if (persist) {
+    persistSettings();
+    renderAll();
+  }
+}
+
+function markSummaryDirty() {
+  if (state.localAi.summarizing) {
+    return;
+  }
+
+  if (state.localAi.summaryText) {
+    state.localAi.summaryDirty = true;
+  }
+}
+
+function clearLocalSummary({ keepExpanded = false, keepDetailLevel = false } = {}) {
+  state.localAi.summaryText = '';
+  state.localAi.summaryWarning = '';
+  state.localAi.summaryDirty = false;
+  state.localAi.summarySourceChars = 0;
+  state.localAi.summaryDetailLevel = 'standard';
+  state.localAi.summaryModelName = '';
+  state.localAi.summaryContextSignature = '';
+  state.localAi.summaryError = '';
+  if (!keepExpanded) {
+    state.localAi.summaryExpanded = false;
+  }
+}
+
+function cancelLocalAiWork({ silent = false } = {}) {
+  if (state.localAi.activeController) {
+    state.localAi.activeController.abort();
+  }
+
+  const hadCheck = state.localAi.checking || state.localAi.pulling;
+  const hadSummary = state.localAi.summarizing;
+  const hadChat = state.localAi.chat.sending;
+  state.localAi.checking = false;
+  state.localAi.pulling = false;
+  state.localAi.summarizing = false;
+  state.localAi.chat.sending = false;
+  state.localAi.progress = null;
+  state.localAi.progressText = '';
+  state.localAi.activeController = null;
+
+  if (hadChat) {
+    const lastMessage = state.localAi.chat.messages[state.localAi.chat.messages.length - 1];
+    if (lastMessage?.pending) {
+      state.localAi.chat.messages.pop();
+    }
+    if (!silent) {
+      state.localAi.chat.status = state.localAi.chat.stale ? 'stale' : 'ready';
+      state.localAi.chat.message = state.localAi.chat.stale
+        ? 'This chat session is out of date.'
+        : 'Chat cancelled.';
+      state.localAi.chat.detail = 'The chat request was cancelled.';
+    }
+  }
+
+  if (hadSummary && !silent) {
+    state.localAi.status = state.localAi.available ? 'ready' : 'idle';
+    state.localAi.message = state.localAi.available
+      ? LOCAL_AI_STATUS_MESSAGES.ready
+      : LOCAL_AI_STATUS_MESSAGES.unavailable;
+    state.localAi.detail = 'Summarization cancelled.';
+  } else if (hadCheck && !silent) {
+    state.localAi.status = state.localAi.available ? 'ready' : 'idle';
+    state.localAi.message = state.localAi.available
+      ? LOCAL_AI_STATUS_MESSAGES.ready
+      : LOCAL_AI_STATUS_MESSAGES.unavailable;
+    state.localAi.detail = 'Local AI check cancelled.';
+  }
+
+  renderAll();
+}
+
+function setLocalAiUnavailable(detail, { keepModel = false } = {}) {
+  state.localAi.available = false;
+  state.localAi.checking = false;
+  state.localAi.pulling = false;
+  state.localAi.summarizing = false;
+  state.localAi.status = 'unavailable';
+  state.localAi.message = LOCAL_AI_STATUS_MESSAGES.unavailable;
+  state.localAi.detail = detail || `Install Ollama from ${OLLAMA_DOWNLOAD_URL} to enable summaries and chat.`;
+  state.localAi.progress = null;
+  state.localAi.progressText = '';
+  state.localAi.summaryError = '';
+  state.localAi.activeController = null;
+  state.localAi.baseUrl = '';
+  if (!keepModel) {
+    state.localAi.modelName = state.settings.localAiModelName || state.localAi.cachedModelName || '';
+  }
+  renderAll();
+}
+
+function setLocalAiReady(model, { source = 'installed', checkedAt = new Date().toISOString() } = {}) {
+  const modelName = normalizeLocalAiModelName(model);
+  state.localAi.available = true;
+  state.localAi.checking = false;
+  state.localAi.pulling = false;
+  state.localAi.summarizing = false;
+  state.localAi.status = 'ready';
+  state.localAi.message = LOCAL_AI_STATUS_MESSAGES.ready;
+  state.localAi.detail = source === 'pulled'
+    ? `${modelName} was downloaded and is ready for summaries and chat.`
+    : `${modelName} is ready for summaries and chat.`;
+  state.localAi.progress = null;
+  state.localAi.progressText = '';
+  state.localAi.summaryError = '';
+  state.localAi.activeController = null;
+  state.localAi.modelName = modelName;
+  state.localAi.cachedModelName = modelName;
+  state.localAi.lastSuccessfulCheckAt = checkedAt;
+  state.settings.localAiModelName = modelName;
+  state.settings.localAiLastSuccessfulCheckAt = checkedAt;
+  persistSettings();
+  renderAll();
+}
+
+function updateLocalAiDownloadProgress(progress) {
+  const percent = Number.isFinite(progress?.progress) ? Math.round(progress.progress) : null;
+  state.localAi.status = 'downloading';
+  state.localAi.message = percent == null
+    ? LOCAL_AI_STATUS_MESSAGES.downloading
+    : `${LOCAL_AI_STATUS_MESSAGES.downloading} (${percent}%)`;
+  state.localAi.detail = progress?.status
+    ? `Pulling ${state.localAi.cachedModelName || state.localAi.modelName || 'the Kimi model'}.`
+    : 'Downloading the latest Kimi model from Ollama.';
+  state.localAi.progress = percent;
+  state.localAi.progressText = percent == null
+    ? progress?.status || 'Downloading Kimi model...'
+    : `${progress?.status || 'Downloading Kimi model...'} (${percent}%)`;
+  renderAll();
+}
+
+async function initializeLocalAi({ forceRefresh = false } = {}) {
+  if (!state.localAi.supported) {
+    setLocalAiUnavailable('Local AI unavailable – install Ollama to enable summaries and chat.');
+    return;
+  }
+
+  if (state.localAi.checking || state.localAi.pulling || state.localAi.summarizing) {
+    cancelLocalAiWork({ silent: true });
+  }
+
+  const requestId = state.localAi.checkRequestId + 1;
+  state.localAi.checkRequestId = requestId;
+  const controller = new AbortController();
+  state.localAi.activeController = controller;
+  state.localAi.available = false;
+  state.localAi.checking = true;
+  state.localAi.pulling = false;
+  state.localAi.summarizing = false;
+  state.localAi.status = 'checking';
+  state.localAi.message = LOCAL_AI_STATUS_MESSAGES.checking;
+  state.localAi.detail = 'Probing Ollama for installed models.';
+  state.localAi.progress = null;
+  state.localAi.progressText = '';
+  state.localAi.summaryError = '';
+  state.localAi.baseUrl = '';
+  renderAll();
+
+  try {
+    const { baseUrl, models } = await fetchOllamaModelsFromCandidates({
+      baseUrls: resolveOllamaBaseUrlCandidates(state.config.localAiBaseUrl),
+      signal: controller.signal
+    });
+    if (controller.signal.aborted || requestId !== state.localAi.checkRequestId) {
+      return;
+    }
+
+    state.localAi.baseUrl = baseUrl;
+    state.localAi.installedModels = Array.isArray(models) ? models : [];
+
+    const selectedModelName = normalizeLocalAiText(state.localAi.modelName || state.settings.localAiModelName);
+    const installedModel = selectedModelName
+      ? state.localAi.installedModels.find((model) => normalizeLocalAiModelName(model).toLowerCase() === selectedModelName.toLowerCase())
+      : null;
+    const bestInstalled = resolveBestKimiModel(state.localAi.installedModels, {
+      cachedModelName: selectedModelName || state.localAi.cachedModelName || state.settings.localAiModelName
+    });
+
+    if (installedModel) {
+      setLocalAiReady(installedModel, {
+        source: 'installed'
+      });
+      return;
+    }
+
+    if (!selectedModelName && bestInstalled) {
+      setLocalAiReady(bestInstalled.model || bestInstalled, {
+        source: 'installed'
+      });
+      return;
+    }
+
+    if (!forceRefresh) {
+      state.localAi.available = false;
+      state.localAi.checking = false;
+      state.localAi.pulling = false;
+      state.localAi.summarizing = false;
+      state.localAi.status = 'idle';
+      state.localAi.message = LOCAL_AI_STATUS_MESSAGES.idle;
+      state.localAi.detail = selectedModelName
+        ? `${selectedModelName} is not installed yet. Click Download selected model to fetch it from Ollama.`
+        : 'Ollama responded, but no Kimi model is installed yet. Click Download latest Kimi model to fetch the recommended model.';
+      state.localAi.progress = null;
+      state.localAi.progressText = '';
+      state.localAi.summaryError = '';
+      state.localAi.activeController = null;
+      if (!selectedModelName) {
+        const candidate = resolvePreferredKimiPullCandidate({
+          cachedModelName: state.localAi.cachedModelName || state.settings.localAiModelName
+        });
+        state.localAi.modelName = candidate?.name || state.localAi.cachedModelName || state.settings.localAiModelName || '';
+        state.settings.localAiModelName = state.localAi.modelName;
+      } else {
+        state.localAi.modelName = selectedModelName;
+        state.settings.localAiModelName = selectedModelName;
+      }
+      renderAll();
+      return;
+    }
+
+    const candidate = selectedModelName
+      ? LOCAL_AI_PULL_CANDIDATES.find((entry) => entry.name.toLowerCase() === selectedModelName.toLowerCase())
+        || resolvePreferredKimiPullCandidate({
+          cachedModelName: selectedModelName || state.localAi.cachedModelName || state.settings.localAiModelName
+        })
+      : resolvePreferredKimiPullCandidate({
+        cachedModelName: state.localAi.cachedModelName || state.settings.localAiModelName
+      });
+    if (!candidate) {
+      throw new Error('No Kimi pull candidate was available.');
+    }
+
+    state.localAi.modelName = candidate.name;
+    state.settings.localAiModelName = candidate.name;
+    state.localAi.cachedModelName = candidate.name;
+    renderAll();
+
+    state.localAi.checking = false;
+    state.localAi.pulling = true;
+    state.localAi.status = 'downloading';
+    state.localAi.message = LOCAL_AI_STATUS_MESSAGES.downloading;
+    state.localAi.detail = `Downloading ${candidate.label} from Ollama.`;
+    state.localAi.progress = null;
+    state.localAi.progressText = 'Downloading Kimi model...';
+    renderAll();
+
+    await pullOllamaModelWithProgress({
+      modelName: candidate.name,
+      baseUrl: resolveLocalAiBaseUrl(),
+      signal: controller.signal,
+      onProgress: updateLocalAiDownloadProgress
+    });
+
+    if (controller.signal.aborted || requestId !== state.localAi.checkRequestId) {
+      return;
+    }
+
+    const refreshedModels = await fetchOllamaModels({
+      baseUrl: resolveLocalAiBaseUrl(),
+      signal: controller.signal
+    });
+    if (controller.signal.aborted || requestId !== state.localAi.checkRequestId) {
+      return;
+    }
+
+    state.localAi.installedModels = Array.isArray(refreshedModels) ? refreshedModels : state.localAi.installedModels;
+    const resolved = resolveBestKimiModel(refreshedModels, {
+      cachedModelName: candidate.name
+    });
+    setLocalAiReady(resolved?.model || resolved || { name: candidate.name }, {
+      source: 'pulled'
+    });
+  } catch (error) {
+    if (controller.signal.aborted || requestId !== state.localAi.checkRequestId) {
+      return;
+    }
+
+    const wasPulling = state.localAi.pulling;
+    state.localAi.available = false;
+    state.localAi.checking = false;
+    state.localAi.pulling = false;
+    state.localAi.summarizing = false;
+    state.localAi.status = 'unavailable';
+    state.localAi.message = LOCAL_AI_STATUS_MESSAGES.unavailable;
+    if (!wasPulling && Array.isArray(error?.attempts) && error.attempts.length > 0) {
+      const attemptedBaseUrls = error.attempts.map((attempt) => attempt.baseUrl).filter(Boolean);
+      state.localAi.detail = attemptedBaseUrls.length
+        ? `Tried ${attemptedBaseUrls.join(', ')} but Ollama did not answer. Make sure Ollama is running on this device, then click Retry.`
+        : 'Ollama did not answer. Make sure Ollama is running on this device, then click Retry.';
+    } else {
+      state.localAi.detail = describeLocalAiError(error, {
+        phase: wasPulling ? 'pull' : 'connect',
+        baseUrl: state.localAi.baseUrl || OLLAMA_DEFAULT_BASE_URL
+      });
+    }
+    state.localAi.progress = null;
+    state.localAi.progressText = '';
+    state.localAi.activeController = null;
+    renderAll();
+  } finally {
+    if (requestId === state.localAi.checkRequestId) {
+      state.localAi.checking = false;
+      state.localAi.pulling = false;
+      state.localAi.activeController = null;
+      renderAll();
+    }
+  }
+}
+
+async function summarizeCurrentTranscript() {
+  const transcript = (refs.transcriptEditor.value || state.transcriptText || '').trim();
+  if (!transcript) {
+    setStatus('Add a transcript before summarizing.');
+    return;
+  }
+
+  if (!state.localAi.supported || !state.localAi.available || !state.localAi.modelName) {
+    setStatus(LOCAL_AI_STATUS_MESSAGES.unavailable);
+    return;
+  }
+
+  if (state.localAi.checking || state.localAi.pulling) {
+    setStatus('Wait for the Kimi model to finish loading.');
+    return;
+  }
+
+  if (state.localAi.summarizing) {
+    cancelLocalAiWork({ silent: true });
+  }
+
+  const detailLevel = selectedSummaryDetail();
+  const requestId = state.localAi.summarizeRequestId + 1;
+  state.localAi.summarizeRequestId = requestId;
+  const controller = new AbortController();
+  state.localAi.activeController = controller;
+  state.localAi.summarizing = true;
+  state.localAi.status = 'summarizing';
+  state.localAi.message = LOCAL_AI_STATUS_MESSAGES.summarizing;
+  state.localAi.detail = `Using ${state.localAi.modelName} at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`;
+  state.localAi.summaryError = '';
+  state.localAi.summaryWarning = '';
+  state.localAi.summaryDirty = false;
+  state.localAi.summarySourceChars = transcript.length;
+  state.localAi.summaryContextSignature = buildLocalAiTextSignature(transcript);
+  const localAiBaseUrl = resolveLocalAiBaseUrl();
+  renderAll();
+
+  try {
+    const result = await summarizeWithOllama({
+      modelName: state.localAi.modelName,
+      transcriptText: transcript,
+      detailLevel,
+      baseUrl: localAiBaseUrl,
+      signal: controller.signal
+    });
+
+    if (controller.signal.aborted || requestId !== state.localAi.summarizeRequestId) {
+      return;
+    }
+
+    state.localAi.summaryText = result.summary;
+    state.localAi.summaryWarning = result.preparedTranscript.truncated
+      ? result.preparedTranscript.warning
+      : '';
+    state.localAi.summaryError = '';
+    state.localAi.summaryExpanded = false;
+    state.localAi.summaryDirty = false;
+    state.localAi.summarySourceChars = transcript.length;
+    state.localAi.summaryDetailLevel = detailLevel;
+    state.localAi.summaryModelName = state.localAi.modelName;
+    state.localAi.summaryContextSignature = buildLocalAiTextSignature(transcript);
+    state.localAi.summarizing = false;
+    state.localAi.status = 'ready';
+    state.localAi.message = LOCAL_AI_STATUS_MESSAGES.ready;
+    state.localAi.detail = `Summarized with ${state.localAi.modelName} at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`;
+    state.localAi.activeController = null;
+    setStatus(`Summary ready with ${state.localAi.modelName}.`);
+    renderAll();
+  } catch (error) {
+    if (controller.signal.aborted || requestId !== state.localAi.summarizeRequestId) {
+      return;
+    }
+
+    state.localAi.summarizing = false;
+    state.localAi.activeController = null;
+    state.localAi.status = 'ready';
+    state.localAi.message = LOCAL_AI_STATUS_MESSAGES.ready;
+    state.localAi.detail = 'Summarization failed. You can retry with a different detail level.';
+    state.localAi.summaryError = describeLocalAiError(error, {
+      phase: 'summary',
+      baseUrl: resolveLocalAiBaseUrl()
+    });
+    setStatus(`Summarization failed: ${state.localAi.summaryError}`);
+    renderAll();
+  } finally {
+    if (requestId === state.localAi.summarizeRequestId) {
+      state.localAi.summarizing = false;
+      state.localAi.activeController = null;
+      renderAll();
+    }
+  }
+}
+
+function dismissSummary() {
+  clearLocalSummary();
+  state.localAi.summaryError = '';
+  state.localAi.summaryWarning = '';
+  state.localAi.summaryDirty = false;
+  setStatus('Summary dismissed.');
+  renderAll();
+}
+
+async function copySummary() {
+  const text = state.localAi.summaryText || '';
+  if (!text) {
+    setStatus('Nothing to copy yet.');
+    return;
+  }
+
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus('Summary copied to the clipboard.');
+  } catch {
+    const temporary = document.createElement('textarea');
+    temporary.value = text;
+    temporary.setAttribute('readonly', '');
+    temporary.style.position = 'fixed';
+    temporary.style.left = '-9999px';
+    document.body.appendChild(temporary);
+    temporary.focus();
+    temporary.select();
+    document.execCommand('copy');
+    temporary.remove();
+    setStatus('Summary copied.');
+  }
+}
+
+function toggleSummaryExpanded() {
+  if (!state.localAi.summaryText) {
+    return;
+  }
+
+  state.localAi.summaryExpanded = !state.localAi.summaryExpanded;
+  renderAll();
+}
+
+function startLocalChatSession({ keepDraft = true } = {}) {
+  if (state.localAi.activeController || state.localAi.chat.sending || state.localAi.checking || state.localAi.pulling || state.localAi.summarizing) {
+    cancelLocalAiWork({ silent: true });
+  }
+
+  const { transcriptText, summaryText, currentSignature } = syncLocalAiChatContext();
+  state.localAi.chat.contextSignature = transcriptText ? currentSignature : '';
+  state.localAi.chat.messages = [];
+  state.localAi.chat.stale = false;
+  state.localAi.chat.sending = false;
+  state.localAi.chat.requestId += 1;
+  state.localAi.chat.error = '';
+  state.localAi.chat.status = transcriptText ? 'ready' : 'idle';
+  state.localAi.chat.message = transcriptText
+    ? 'New chat session ready.'
+    : 'Add a transcript to start chatting.';
+  state.localAi.chat.detail = transcriptText
+    ? (summaryText
+      ? 'The current transcript and summary are fixed context for this session.'
+      : 'The current transcript is fixed context for this session.')
+    : 'Chat becomes available after a transcript exists.';
+  if (!keepDraft) {
+    state.localAi.chat.draft = '';
+  }
+  setStatus('New chat session started.');
+  persistSessionDraft();
+  renderAll();
+}
+
+function clearLocalChatSession() {
+  if (state.localAi.activeController || state.localAi.chat.sending || state.localAi.checking || state.localAi.pulling || state.localAi.summarizing) {
+    cancelLocalAiWork({ silent: true });
+  }
+
+  state.localAi.chat.contextSignature = '';
+  state.localAi.chat.messages = [];
+  state.localAi.chat.draft = '';
+  state.localAi.chat.stale = false;
+  state.localAi.chat.sending = false;
+  state.localAi.chat.requestId += 1;
+  state.localAi.chat.error = '';
+  state.localAi.chat.status = 'idle';
+  state.localAi.chat.message = 'Chat cleared.';
+  state.localAi.chat.detail = 'Start a new session to ask follow-up questions.';
+  setStatus('Chat cleared.');
+  persistSessionDraft();
+  renderAll();
+}
+
+async function sendChatMessage() {
+  const transcriptText = normalizeLocalAiText(refs.transcriptEditor.value || state.transcriptText);
+  const summaryText = normalizeLocalAiText(state.localAi.summaryText);
+  const userMessage = normalizeLocalAiText(refs.chatInput.value || state.localAi.chat.draft);
+
+  if (!transcriptText) {
+    setStatus('Add a transcript before chatting.');
+    return;
+  }
+
+  if (!state.localAi.supported || !state.localAi.available || !state.localAi.modelName) {
+    setStatus(state.localAi.detail || LOCAL_AI_STATUS_MESSAGES.unavailable);
+    return;
+  }
+
+  if (state.localAi.chat.stale) {
+    setStatus('Start a new chat session after the transcript or summary changes.');
+    return;
+  }
+
+  if (!userMessage) {
+    setStatus('Add a question before starting the chat.');
+    return;
+  }
+
+  if (state.localAi.chat.sending) {
+    return;
+  }
+
+  const requestId = state.localAi.chat.requestId + 1;
+  state.localAi.chat.requestId = requestId;
+  const controller = new AbortController();
+  state.localAi.activeController = controller;
+  state.localAi.chat.sending = true;
+  state.localAi.chat.status = 'thinking';
+  state.localAi.chat.message = 'Thinking...';
+  state.localAi.chat.detail = 'Ollama is streaming a reply locally.';
+  state.localAi.chat.error = '';
+  state.localAi.chat.contextSignature = buildLocalAiContextSignature(transcriptText, summaryText);
+  state.localAi.chat.messages.push(
+    {
+      role: 'user',
+      content: userMessage
+    },
+    {
+      role: 'assistant',
+      content: '',
+      pending: true
+    }
+  );
+  state.localAi.chat.draft = '';
+  renderAll();
+
+  let chatFailed = false;
+  try {
+    const history = sanitizeLocalAiChatMessages(state.localAi.chat.messages.slice(0, -2));
+    const localAiBaseUrl = resolveLocalAiBaseUrl();
+    const result = await chatWithOllama({
+      modelName: state.localAi.modelName,
+      transcriptText,
+      summaryText,
+      history,
+      userMessage,
+      baseUrl: localAiBaseUrl,
+      signal: controller.signal,
+      onChunk: (reply) => {
+        if (controller.signal.aborted || requestId !== state.localAi.chat.requestId) {
+          return;
+        }
+
+        const lastMessage = state.localAi.chat.messages[state.localAi.chat.messages.length - 1];
+        if (lastMessage) {
+          lastMessage.content = reply;
+          lastMessage.pending = true;
+        }
+        renderAll();
+      }
+    });
+
+    if (controller.signal.aborted || requestId !== state.localAi.chat.requestId) {
+      return;
+    }
+
+    const lastMessage = state.localAi.chat.messages[state.localAi.chat.messages.length - 1];
+    if (lastMessage) {
+      lastMessage.content = result.reply;
+      lastMessage.pending = false;
+      delete lastMessage.error;
+    }
+    state.localAi.chat.sending = false;
+    state.localAi.chat.status = 'ready';
+    state.localAi.chat.message = 'Conversation ready.';
+    state.localAi.chat.detail = `Reply generated with ${state.localAi.modelName}.`;
+    state.localAi.chat.error = '';
+    state.localAi.activeController = null;
+    setStatus('Chat reply ready.');
+    persistSessionDraft();
+    renderAll();
+  } catch (error) {
+    if (controller.signal.aborted || requestId !== state.localAi.chat.requestId) {
+      return;
+    }
+
+    const detail = describeLocalAiError(error, {
+      phase: 'chat',
+      baseUrl: resolveLocalAiBaseUrl()
+    });
+    const lastMessage = state.localAi.chat.messages[state.localAi.chat.messages.length - 1];
+    if (lastMessage) {
+      lastMessage.content = detail;
+      lastMessage.pending = false;
+      lastMessage.error = true;
+    }
+    state.localAi.chat.sending = false;
+    state.localAi.chat.status = 'error';
+    state.localAi.chat.message = 'Chat failed.';
+    state.localAi.chat.detail = detail;
+    state.localAi.chat.error = detail;
+    state.localAi.activeController = null;
+    chatFailed = true;
+    setStatus(detail);
+    persistSessionDraft();
+    renderAll();
+  } finally {
+    if (requestId === state.localAi.chat.requestId) {
+      state.localAi.chat.sending = false;
+      if (!chatFailed && !state.localAi.chat.stale && state.localAi.chat.messages.length) {
+        state.localAi.chat.status = 'ready';
+        state.localAi.chat.message = 'Conversation ready.';
+      }
+      state.localAi.activeController = null;
+      renderAll();
+    }
+  }
 }
 
 function describeWhisperProgress(progress) {
@@ -534,12 +1842,14 @@ async function loadRuntime() {
     state.runtimeDevice = null;
     state.runtimeProgressMessage = '';
     setStatus(`Failed to load runtime: ${error.message}`);
+    teardownWorkers();
   } finally {
     state.runtimeLoading = false;
     state.runtimeProgressMessage = '';
     refs.loadRuntimeButton.disabled = false;
     updateRuntimeButtonLabel();
     renderAll();
+    persistSessionDraft({ immediate: true });
   }
 }
 
@@ -594,6 +1904,7 @@ async function handleFileSelection(file, {
     state.serverBackupNotice = '';
     state.outputs = { txt: '', srt: '', vtt: '', preview: '' };
     state.durationSeconds = 0;
+    clearLocalSummary({ keepDetailLevel: true });
     if (!preserveRecordingPreview) {
       clearRecordingPreview();
     }
@@ -602,6 +1913,7 @@ async function handleFileSelection(file, {
     updateTranscriptPreview();
     refs.timedPreview.textContent = 'No transcript yet.';
     renderAll();
+    persistSessionDraft({ immediate: true });
     return;
   }
 
@@ -619,6 +1931,7 @@ async function handleFileSelection(file, {
   }
   state.outputs = { txt: '', srt: '', vtt: '', preview: '' };
   state.durationSeconds = initialDurationSeconds;
+  clearLocalSummary({ keepDetailLevel: true });
   refs.fileInput.value = '';
   refs.transcriptEditor.value = '';
   updateTranscriptPreview();
@@ -626,8 +1939,8 @@ async function handleFileSelection(file, {
   if (!preserveRecordingPreview) {
     clearRecordingPreview();
   }
-  setStatus(`Selected ${file.name}. Reload Whisper / Export to continue.`);
-  persistSessionDraft();
+  setStatus(`Selected ${file.name}. Load Whisper / Export to continue.`);
+  persistSessionDraft({ immediate: true });
   renderAll();
 
   if (state.settings.serverCopy) {
@@ -642,7 +1955,7 @@ async function transcribeCurrentFile() {
   }
 
   if (!state.runtimeReady || !state.whisperClient || !state.formatterClient) {
-    setStatus('Reload Whisper / Export before transcribing.');
+    setStatus('Load Whisper / Export before transcribing.');
     return;
   }
 
@@ -651,6 +1964,7 @@ async function transcribeCurrentFile() {
   const jobId = state.currentJobId;
   renderAll();
   state.transcriptNotice = '';
+  clearLocalSummary({ keepDetailLevel: true });
   setStatus(`Preparing ${state.file.name}...`);
   refs.cancelButton.hidden = false;
 
@@ -750,7 +2064,7 @@ async function transcribeCurrentFile() {
     state.transcribing = false;
     refs.cancelButton.hidden = true;
     renderAll();
-    persistSessionDraft();
+    persistSessionDraft({ immediate: true });
   }
 }
 
@@ -766,10 +2080,12 @@ function cancelTranscription() {
     preview: 'Transcription cancelled.'
   };
   state.transcriptNotice = 'Transcription cancelled.';
+  clearLocalSummary({ keepDetailLevel: true });
   state.whisperClient?.raw?.postMessage({ type: 'cancel' });
   refs.cancelButton.hidden = true;
   setStatus('Transcription cancelled.');
   renderAll();
+  persistSessionDraft({ immediate: true });
 }
 
 async function rerenderFormatter() {
@@ -917,6 +2233,7 @@ function renderAll() {
   refs.speakerNames.hidden = !state.settings.speakerMode;
   refs.timedPreview.textContent = state.outputs.preview || transcriptPreviewText();
   updateTranscriptPreview();
+  renderLocalAiState();
 
   updateRuntimeButtonLabel();
   updateDownloadLabels();
@@ -966,8 +2283,8 @@ function preferredDevice() {
   return navigator.gpu ? 'webgpu' : 'wasm';
 }
 
-function persistSettings() {
-  const payload = {
+function buildSettingsSnapshot() {
+  return {
     modelKey: refs.modelSelect.value,
     task: refs.taskSelect.value,
     language: refs.languageSelect.value,
@@ -979,18 +2296,94 @@ function persistSettings() {
       refs.speakerTwo.value || 'Speaker 2'
     ],
     serverCopy: refs.serverCopyToggle.checked,
-    transcriptText: state.transcriptText
+    summaryDetail: refs.summaryDetailBrief.checked
+      ? 'brief'
+      : refs.summaryDetailDetailed.checked
+        ? 'detailed'
+        : 'standard',
+    localAiModelName: state.localAi.modelName || '',
+    localAiLastSuccessfulCheckAt: state.localAi.lastSuccessfulCheckAt || '',
+    localAiSummaryText: state.localAi.summaryText || '',
+    localAiSummaryWarning: state.localAi.summaryWarning || '',
+    localAiSummarySourceChars: state.localAi.summarySourceChars || 0,
+    localAiSummaryDetailLevel: state.localAi.summaryDetailLevel || 'standard',
+    localAiSummaryModelName: state.localAi.summaryModelName || '',
+    localAiSummaryExpanded: Boolean(state.localAi.summaryExpanded),
+    localAiSummaryContextSignature: state.localAi.summaryContextSignature || '',
+    localAiChat: {
+      contextSignature: state.localAi.chat.contextSignature || '',
+      draft: state.localAi.chat.draft || '',
+      error: state.localAi.chat.error || '',
+      messages: sanitizeLocalAiChatMessages(state.localAi.chat.messages)
+    },
+    transcriptText: state.transcriptText || ''
   };
-
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-  } catch {
-    // Ignore quota and privacy failures on restrictive shared-hosting browsers.
-  }
 }
 
-function persistSessionDraft() {
-  persistSettings();
+function buildPersistedFileSnapshot() {
+  if (!state.file) {
+    return null;
+  }
+
+  return {
+    file: state.file,
+    name: state.file.name,
+    type: state.file.type,
+    size: state.file.size,
+    lastModified: state.file.lastModified,
+    kind: state.fileKind,
+    source: state.fileSource,
+    durationSeconds: state.durationSeconds || 0
+  };
+}
+
+function buildPersistedSessionSnapshot() {
+  return {
+    version: 1,
+    savedAt: new Date().toISOString(),
+    runtime: {
+      loaded: Boolean(state.runtimeReady || state.runtimeLoading || state.whisperClient || state.formatterClient),
+      modelKey: state.settings.modelKey,
+      device: state.runtimeDevice || ''
+    },
+    file: buildPersistedFileSnapshot(),
+    recording: {
+      previewDurationSeconds: state.recording.previewDurationSeconds || 0
+    },
+    transcript: {
+      text: state.transcriptText || '',
+      notice: state.transcriptNotice || '',
+      segments: state.segments,
+      outputs: state.outputs,
+      durationSeconds: state.durationSeconds || 0,
+      normalizedSampleRate: state.normalizedSampleRate || 16_000,
+      fileKind: state.fileKind,
+      fileSource: state.fileSource,
+      serverBackup: state.serverBackup,
+      serverBackupNotice: state.serverBackupNotice || ''
+    }
+  };
+}
+
+function buildSessionFallbackManifest(snapshot = buildPersistedSessionSnapshot()) {
+  return {
+    version: snapshot.version,
+    savedAt: snapshot.savedAt,
+    runtime: snapshot.runtime,
+    file: snapshot.file
+      ? {
+          name: snapshot.file.name,
+          type: snapshot.file.type,
+          size: snapshot.file.size,
+          lastModified: snapshot.file.lastModified,
+          kind: snapshot.file.kind,
+          source: snapshot.file.source,
+          durationSeconds: snapshot.file.durationSeconds
+        }
+      : null,
+    recording: snapshot.recording,
+    transcript: snapshot.transcript
+  };
 }
 
 function loadSettings() {
@@ -1003,6 +2396,22 @@ function loadSettings() {
     speakerMode: false,
     speakerNames: ['Speaker 1', 'Speaker 2'],
     serverCopy: false,
+    summaryDetail: 'standard',
+    localAiModelName: '',
+    localAiLastSuccessfulCheckAt: '',
+    localAiSummaryText: '',
+    localAiSummaryWarning: '',
+    localAiSummarySourceChars: 0,
+    localAiSummaryDetailLevel: 'standard',
+    localAiSummaryModelName: '',
+    localAiSummaryExpanded: false,
+    localAiSummaryContextSignature: '',
+    localAiChat: {
+      contextSignature: '',
+      draft: '',
+      error: '',
+      messages: []
+    },
     transcriptText: ''
   };
 
@@ -1016,6 +2425,22 @@ function loadSettings() {
     return {
       ...defaults,
       ...parsed,
+      summaryDetail: normalizeLocalAiDetailLevel(parsed?.summaryDetail || defaults.summaryDetail),
+      localAiModelName: String(parsed?.localAiModelName || ''),
+      localAiLastSuccessfulCheckAt: String(parsed?.localAiLastSuccessfulCheckAt || ''),
+      localAiSummaryText: String(parsed?.localAiSummaryText || ''),
+      localAiSummaryWarning: String(parsed?.localAiSummaryWarning || ''),
+      localAiSummarySourceChars: Number(parsed?.localAiSummarySourceChars || 0) || 0,
+      localAiSummaryDetailLevel: normalizeLocalAiDetailLevel(parsed?.localAiSummaryDetailLevel || defaults.summaryDetail),
+      localAiSummaryModelName: String(parsed?.localAiSummaryModelName || ''),
+      localAiSummaryExpanded: Boolean(parsed?.localAiSummaryExpanded),
+      localAiSummaryContextSignature: String(parsed?.localAiSummaryContextSignature || ''),
+      localAiChat: {
+        contextSignature: String(parsed?.localAiChat?.contextSignature || ''),
+        draft: String(parsed?.localAiChat?.draft || ''),
+        error: String(parsed?.localAiChat?.error || ''),
+        messages: sanitizeLocalAiChatMessages(parsed?.localAiChat?.messages)
+      },
       speakerNames: Array.isArray(parsed?.speakerNames) && parsed.speakerNames.length >= 2
         ? [String(parsed.speakerNames[0] || 'Speaker 1'), String(parsed.speakerNames[1] || 'Speaker 2')]
         : defaults.speakerNames
@@ -1025,22 +2450,370 @@ function loadSettings() {
   }
 }
 
-function hydrateFromStorage() {
-  refs.modelSelect.value = state.settings.modelKey;
-  refs.taskSelect.value = state.settings.task;
-  refs.languageSelect.value = state.settings.language;
-  refs.cleanupToggle.checked = state.settings.cleanup;
-  refs.timestampsToggle.checked = state.settings.timestamps;
-  refs.speakerToggle.checked = state.settings.speakerMode;
-  refs.speakerOne.value = state.settings.speakerNames[0];
-  refs.speakerTwo.value = state.settings.speakerNames[1];
-  refs.serverCopyToggle.checked = state.settings.serverCopy;
-  state.transcriptText = state.settings.transcriptText || '';
-  refs.transcriptEditor.value = state.transcriptText;
-  state.transcriptNotice = '';
+function applySettingsSnapshot() {
+  state.localAi.modelName = state.settings.localAiModelName || '';
+  state.localAi.cachedModelName = state.settings.localAiModelName || '';
+  state.localAi.lastSuccessfulCheckAt = state.settings.localAiLastSuccessfulCheckAt || '';
+  state.localAi.summaryText = state.settings.localAiSummaryText || '';
+  state.localAi.summaryWarning = state.settings.localAiSummaryWarning || '';
+  state.localAi.summarySourceChars = Number(state.settings.localAiSummarySourceChars || 0) || 0;
+  state.localAi.summaryDetailLevel = state.settings.localAiSummaryDetailLevel || 'standard';
+  state.localAi.summaryModelName = state.settings.localAiSummaryModelName || '';
+  state.localAi.summaryExpanded = Boolean(state.settings.localAiSummaryExpanded);
+  state.localAi.summaryContextSignature = state.settings.localAiSummaryContextSignature || '';
+  state.localAi.chat.contextSignature = state.settings.localAiChat?.contextSignature || '';
+  state.localAi.chat.draft = state.settings.localAiChat?.draft || '';
+  state.localAi.chat.error = state.settings.localAiChat?.error || '';
+  state.localAi.chat.messages = sanitizeLocalAiChatMessages(state.settings.localAiChat?.messages);
+  state.localAi.chat.sending = false;
+  state.localAi.chat.status = state.localAi.chat.messages.length ? 'ready' : 'idle';
+  state.localAi.chat.message = '';
+  state.localAi.chat.detail = '';
+  state.localAi.chat.stale = false;
+
+  if (!state.transcriptText && state.settings.transcriptText) {
+    state.transcriptText = state.settings.transcriptText;
+  }
+
+  if (state.localAi.summaryText && !state.localAi.summaryContextSignature) {
+    state.localAi.summaryContextSignature = buildLocalAiTextSignature(state.transcriptText || '');
+  }
+
+  if (state.localAi.summaryText && !state.localAi.summaryModelName) {
+    state.localAi.summaryModelName = state.localAi.modelName || state.settings.localAiModelName || '';
+  }
+
+  if (state.localAi.chat.messages.length && !state.localAi.chat.contextSignature) {
+    state.localAi.chat.contextSignature = buildLocalAiContextSignature(state.transcriptText || '', state.localAi.summaryText || '');
+  }
+}
+
+function persistSettings() {
+  const payload = buildSettingsSnapshot();
+  const serialized = JSON.stringify(payload);
+  if (serialized === lastPersistedSettings) {
+    return;
+  }
+
+  lastPersistedSettings = serialized;
+  try {
+    localStorage.setItem(STORAGE_KEY, serialized);
+  } catch {
+    // Ignore quota and privacy failures on restrictive shared-hosting browsers.
+  }
+}
+
+function persistSessionDraft({ immediate = false } = {}) {
+  sessionPersistPending = true;
+
+  if (sessionPersistTimerId) {
+    window.clearTimeout(sessionPersistTimerId);
+    sessionPersistTimerId = 0;
+  }
+
+  if (immediate) {
+    void flushPersistedSession();
+    return;
+  }
+
+  sessionPersistTimerId = window.setTimeout(() => {
+    sessionPersistTimerId = 0;
+    void flushPersistedSession();
+  }, 250);
+}
+
+async function flushPersistedSession() {
+  if (!sessionPersistPending) {
+    return;
+  }
+
+  sessionPersistPending = false;
+  const snapshot = buildPersistedSessionSnapshot();
+  const fallbackManifest = buildSessionFallbackManifest(snapshot);
+
+  try {
+    localStorage.setItem(SESSION_FALLBACK_KEY, JSON.stringify(fallbackManifest));
+  } catch {
+    // Keep going even if the fallback manifest cannot be stored.
+  }
+
+  try {
+    await writePersistedSession(snapshot);
+  } catch {
+    // Keep the localStorage fallback even when IndexedDB is unavailable.
+  }
+}
+
+function loadSessionFallbackManifest() {
+  try {
+    const raw = localStorage.getItem(SESSION_FALLBACK_KEY);
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw);
+    return normalizePersistedSession(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function normalizePersistedSession(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') {
+    return null;
+  }
+
+  const runtime = snapshot.runtime && typeof snapshot.runtime === 'object'
+    ? snapshot.runtime
+    : {};
+  const file = snapshot.file && typeof snapshot.file === 'object'
+    ? snapshot.file
+    : null;
+  const recording = snapshot.recording && typeof snapshot.recording === 'object'
+    ? snapshot.recording
+    : {};
+  const transcript = snapshot.transcript && typeof snapshot.transcript === 'object'
+    ? snapshot.transcript
+    : {};
+
+  return {
+    version: Number(snapshot.version || 1) || 1,
+    savedAt: String(snapshot.savedAt || ''),
+    runtime: {
+      loaded: Boolean(runtime.loaded),
+      modelKey: String(runtime.modelKey || ''),
+      device: String(runtime.device || '')
+    },
+    file: file
+      ? {
+          ...file,
+          file: file.file ?? null
+        }
+      : null,
+    recording: {
+      previewDurationSeconds: Number(recording.previewDurationSeconds || 0) || 0
+    },
+    transcript: {
+      text: String(transcript.text || ''),
+      notice: String(transcript.notice || ''),
+      segments: sanitizePersistedSegments(transcript.segments),
+      outputs: {
+        txt: String(transcript.outputs?.txt || ''),
+        srt: String(transcript.outputs?.srt || ''),
+        vtt: String(transcript.outputs?.vtt || ''),
+        preview: String(transcript.outputs?.preview || '')
+      },
+      durationSeconds: Number(transcript.durationSeconds || 0) || 0,
+      normalizedSampleRate: Number(transcript.normalizedSampleRate || 16_000) || 16_000,
+      fileKind: String(transcript.fileKind || ''),
+      fileSource: String(transcript.fileSource || ''),
+      serverBackup: transcript.serverBackup && typeof transcript.serverBackup === 'object'
+        ? transcript.serverBackup
+        : null,
+      serverBackupNotice: String(transcript.serverBackupNotice || '')
+    }
+  };
+}
+
+function sanitizePersistedSegments(segments) {
+  if (!Array.isArray(segments)) {
+    return [];
+  }
+
+  return segments
+    .filter((segment) => segment && typeof segment === 'object')
+    .map((segment) => ({
+      ...segment,
+      start: Number(segment.start || 0) || 0,
+      end: Number(segment.end || 0) || 0,
+      text: String(segment.text || '').trim(),
+      ...(segment.speakerLabel ? { speakerLabel: String(segment.speakerLabel).trim() } : {})
+    }))
+    .filter((segment) => segment.text);
+}
+
+function rebuildPersistedFile(fileRecord) {
+  if (!fileRecord || typeof fileRecord !== 'object') {
+    return null;
+  }
+
+  const source = fileRecord.file instanceof File || fileRecord.file instanceof Blob
+    ? fileRecord.file
+    : fileRecord.blob instanceof Blob
+      ? fileRecord.blob
+      : null;
+  if (!source) {
+    return null;
+  }
+
+  const name = String(fileRecord.name || source.name || 'restored-audio.bin');
+  const type = String(fileRecord.type || source.type || 'application/octet-stream');
+  const lastModified = Number(fileRecord.lastModified || source.lastModified || Date.now()) || Date.now();
+
+  if (source instanceof File) {
+    return source;
+  }
+
+  return new File([source], name, {
+    type,
+    lastModified
+  });
+}
+
+function applyPersistedSession(snapshot) {
+  const normalized = normalizePersistedSession(snapshot);
+  if (!normalized) {
+    return;
+  }
+
+  const runtime = normalized.runtime || {};
+  const file = rebuildPersistedFile(normalized.file);
+  const transcript = normalized.transcript || {};
+
+  if (runtime.modelKey) {
+    state.settings.modelKey = runtime.modelKey;
+  }
+
+  state.runtimeDevice = runtime.device || null;
+  state.runtimeReady = false;
+  state.runtimeLoading = false;
+  state.runtimeDirty = false;
+  state.whisperClient = null;
+  state.formatterClient = null;
+
+  state.file = file;
+  if (file) {
+    state.fileKind = normalized.file?.kind || classifyMediaFile(file).kind;
+    state.fileSource = normalized.file?.source || transcript.fileSource || 'restored session';
+    state.durationSeconds = Number(normalized.file?.durationSeconds || transcript.durationSeconds || 0) || 0;
+  } else {
+    state.fileKind = normalized.file?.kind || transcript.fileKind || 'none';
+    state.fileSource = transcript.fileSource || 'restored session';
+    state.durationSeconds = Number(transcript.durationSeconds || 0) || 0;
+  }
+
+  state.normalizedAudio = null;
+  state.normalizedSampleRate = Number(transcript.normalizedSampleRate || 16_000) || 16_000;
+  state.segments = sanitizePersistedSegments(transcript.segments);
+  state.transcriptText = String(transcript.text || '');
+  state.transcriptNotice = String(transcript.notice || '');
+  state.outputs = {
+    txt: String(transcript.outputs?.txt || state.transcriptText || ''),
+    srt: String(transcript.outputs?.srt || ''),
+    vtt: String(transcript.outputs?.vtt || ''),
+    preview: String(transcript.outputs?.preview || '')
+  };
+  state.serverBackup = transcript.serverBackup && typeof transcript.serverBackup === 'object'
+    ? transcript.serverBackup
+    : null;
+  state.serverBackupNotice = String(transcript.serverBackupNotice || '');
+  state.recording.active = false;
+  state.recording.stream = null;
+  state.recording.recorder = null;
+  state.recording.chunks = [];
+  state.recording.timerId = null;
+  state.recording.startedAt = 0;
+  state.recording.previewDurationSeconds = Number(normalized.recording?.previewDurationSeconds || 0) || 0;
+  if (state.recording.previewUrl) {
+    URL.revokeObjectURL(state.recording.previewUrl);
+  }
+  if (file && state.fileSource === 'microphone recording') {
+    state.recording.previewUrl = URL.createObjectURL(file);
+  } else {
+    state.recording.previewUrl = '';
+  }
+
+  state.dictation.active = false;
+  state.dictation.recognition = null;
+  state.dictation.interim = '';
+
+  state.localAi.modelName = state.settings.localAiModelName || state.localAi.cachedModelName || '';
+  state.localAi.cachedModelName = state.localAi.modelName;
+  state.localAi.lastSuccessfulCheckAt = state.settings.localAiLastSuccessfulCheckAt || '';
+  state.localAi.summaryText = state.settings.localAiSummaryText || '';
+  state.localAi.summaryWarning = state.settings.localAiSummaryWarning || '';
+  state.localAi.summarySourceChars = Number(state.settings.localAiSummarySourceChars || 0) || 0;
+  state.localAi.summaryDetailLevel = state.settings.localAiSummaryDetailLevel || 'standard';
+  state.localAi.summaryModelName = state.settings.localAiSummaryModelName || '';
+  state.localAi.summaryExpanded = Boolean(state.settings.localAiSummaryExpanded);
+  state.localAi.summaryContextSignature = state.settings.localAiSummaryContextSignature || '';
+  state.localAi.chat.contextSignature = state.settings.localAiChat?.contextSignature || '';
+  state.localAi.chat.draft = state.settings.localAiChat?.draft || '';
+  state.localAi.chat.error = state.settings.localAiChat?.error || '';
+  state.localAi.chat.messages = sanitizeLocalAiChatMessages(state.settings.localAiChat?.messages);
+  state.localAi.chat.sending = false;
+  state.localAi.chat.status = state.localAi.chat.messages.length ? 'ready' : 'idle';
+  state.localAi.chat.message = '';
+  state.localAi.chat.detail = '';
+  state.localAi.chat.stale = false;
+
+  if (!state.transcriptText && state.settings.transcriptText) {
+    state.transcriptText = state.settings.transcriptText;
+  }
+
+  if (state.localAi.summaryText && !state.localAi.summaryContextSignature) {
+    state.localAi.summaryContextSignature = buildLocalAiTextSignature(state.transcriptText || '');
+  }
+
+  if (state.localAi.summaryText && !state.localAi.summaryModelName) {
+    state.localAi.summaryModelName = state.localAi.modelName || state.settings.localAiModelName || '';
+  }
+
+  if (state.localAi.chat.messages.length && !state.localAi.chat.contextSignature) {
+    state.localAi.chat.contextSignature = buildLocalAiContextSignature(state.transcriptText || '', state.localAi.summaryText || '');
+  }
+
+  restoreRuntimeAfterHydration = Boolean(runtime.loaded);
+}
+
+async function hydrateFromStorage() {
+  state.settings = loadSettings();
+  applySettingsSnapshot();
+  let persistedSession = null;
+  try {
+    lastPersistedSettings = JSON.stringify(buildSettingsSnapshot());
+  } catch {
+    lastPersistedSettings = '';
+  }
+
+  try {
+    persistedSession = await readPersistedSession();
+  } catch {
+    persistedSession = null;
+  }
+
+  if (!persistedSession) {
+    persistedSession = loadSessionFallbackManifest();
+  }
+
+  if (persistedSession) {
+    applyPersistedSession(persistedSession);
+  } else if (state.settings.transcriptText) {
+    state.transcriptText = state.settings.transcriptText;
+    state.transcriptNotice = '';
+    state.segments = [];
+    state.outputs = {
+      txt: state.transcriptText,
+      srt: '',
+      vtt: '',
+      preview: state.transcriptText
+    };
+    state.file = null;
+    state.fileKind = 'none';
+    state.fileSource = 'restored transcript';
+    state.durationSeconds = 0;
+    state.serverBackup = null;
+    state.serverBackupNotice = '';
+  }
+
+  populateSelectors();
   updateTranscriptPreview();
-  refs.timedPreview.textContent = 'No transcript yet.';
+  refs.timedPreview.textContent = state.outputs.preview || transcriptPreviewText();
   updateRuntimeButtonLabel();
+
+  if (!persistedSession && state.settings.transcriptText) {
+    persistSessionDraft({ immediate: true });
+  }
 }
 
 function readConfig() {
@@ -1059,8 +2832,20 @@ function readConfig() {
     authRequired: Boolean(injected.authRequired),
     uploadLimitBytes,
     clientLimitBytes,
-    storageEnabled: Boolean(injected.storageEnabled ?? true)
+    storageEnabled: Boolean(injected.storageEnabled ?? true),
+    localAiAutoDownload: Boolean(injected.localAiAutoDownload ?? true),
+    localAiBaseUrl: String(injected.localAiBaseUrl || '')
   };
+}
+
+function resolveLocalAiBaseUrl() {
+  const selected = String(state.localAi.baseUrl || '').trim().replace(/\/+$/, '');
+  if (selected) {
+    return selected;
+  }
+
+  const configured = String(state.config.localAiBaseUrl || '').trim().replace(/\/+$/, '');
+  return configured || OLLAMA_DEFAULT_BASE_URL;
 }
 
 function parseInteger(value, fallback) {
@@ -1293,14 +3078,15 @@ async function downloadZip() {
   }
 
   const available = await ensureRenderedOutputs();
+  const normalizedAudio = await ensureNormalizedAudio();
   const names = buildExportNames(state.file.name, state.settings.task);
   const zip = new JSZip();
   zip.file(names.txt, refs.transcriptEditor.value || available.txt || state.transcriptText);
   zip.file(names.srt, available.srt || buildSrt(state.segments, formatterOptions()));
   zip.file(names.vtt, available.vtt || buildVtt(state.segments, formatterOptions()));
 
-  if (state.normalizedAudio?.length) {
-    zip.file(names.wav, encodeWavBytes(state.normalizedAudio, state.normalizedSampleRate));
+  if (normalizedAudio?.length) {
+    zip.file(names.wav, encodeWavBytes(normalizedAudio, state.normalizedSampleRate));
   }
 
   zip.file(state.file.name, await state.file.arrayBuffer());
@@ -1313,8 +3099,29 @@ async function downloadZip() {
   setStatus(`Downloaded ${names.zip}.`);
 }
 
+async function ensureNormalizedAudio() {
+  if (state.normalizedAudio?.length) {
+    return state.normalizedAudio;
+  }
+
+  if (!state.file) {
+    return null;
+  }
+
+  const audio = await extractNormalizedAudio(state.file, {
+    targetSampleRate: state.normalizedSampleRate,
+    preferFfmpeg: state.fileKind === 'video'
+  });
+  state.normalizedAudio = audio.samples;
+  state.normalizedSampleRate = audio.sampleRate;
+  state.durationSeconds = audio.durationSeconds;
+  state.fileSource = audio.source;
+  persistSessionDraft({ immediate: true });
+  return state.normalizedAudio;
+}
+
 async function ensureRenderedOutputs() {
-  if (state.outputs.txt || state.outputs.srt || state.outputs.vtt) {
+  if (state.outputs.srt && state.outputs.vtt && state.outputs.preview) {
     return state.outputs;
   }
 

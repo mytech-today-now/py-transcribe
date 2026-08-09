@@ -23,12 +23,13 @@
         csrfToken: '',
         authRequired: false,
         storageEnabled: true,
+        localAiAutoDownload: true,
         uploadLimitBytes: 16777216,
         clientLimitBytes: 134217728
       };
     </script>
-    <script type="module" crossorigin src="./assets/index-CAsTLeyn.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-uVfnLNUP.css">
+    <script type="module" crossorigin src="./assets/index-BzeJ3mLU.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-CiOJm4Ps.css">
   </head>
   <body>
     <div class="ambient ambient-left" aria-hidden="true"></div>
@@ -84,7 +85,7 @@
         <h2 id="runtime-title" class="sr-only">Runtime controls</h2>
         <div class="toolbar-stack">
           <div class="toolbar-row toolbar-runtime-row">
-          <button id="loadRuntimeButton" class="button button-primary" type="button">Reload Whisper / Python</button>
+          <button id="loadRuntimeButton" class="button button-primary" type="button">Load Whisper / Python</button>
           <div class="toolbar-state toolbar-runtime">
             <span class="toolbar-label">Runtime</span>
             <strong id="runtimeState">Not loaded</strong>
@@ -107,7 +108,7 @@
 
       <footer class="footer card">
         <div class="footer-row">
-          <p id="status" role="status" aria-live="polite">Ready. Reload Whisper, then choose a file.</p>
+          <p id="status" role="status" aria-live="polite">Ready. Load Whisper / Python, then choose a file.</p>
           <p class="fine-print">Local model inference runs in the browser. PHP only stores optional backups and serves the shell.</p>
         </div>
       </footer>
@@ -218,6 +219,90 @@
             <button id="downloadVttButton" class="button button-secondary" type="button" disabled>Download transcript.vtt</button>
             <button id="downloadZipButton" class="button button-accent" type="button" disabled>Download transcript.zip</button>
           </div>
+
+          <section class="local-ai-panel" aria-labelledby="localAiTitle">
+            <div class="panel-header local-ai-header">
+              <div>
+                <h3 id="localAiTitle">Local AI summary</h3>
+                <p class="hint">On desktop browsers, the app checks Ollama automatically and downloads the latest Kimi model when available.</p>
+              </div>
+              <div class="local-ai-actions">
+                <button id="checkAiButton" class="button button-secondary" type="button">Download latest Kimi model</button>
+                <button id="summarizeButton" class="button button-accent" type="button" disabled>Summarize transcript</button>
+                <button id="cancelAiButton" class="button button-secondary" type="button" hidden>Cancel</button>
+              </div>
+            </div>
+
+            <div class="local-ai-status">
+              <p class="local-ai-state"><strong id="aiState">Not checked yet</strong></p>
+              <p id="aiDetail" class="hint">Check Ollama to download the latest Kimi model.</p>
+              <div id="aiProgress" class="local-ai-progress" hidden>
+                <progress id="aiProgressBar" max="100" value="0"></progress>
+                <p id="aiProgressText" class="local-ai-progress-text">Downloading Kimi model...</p>
+              </div>
+            </div>
+
+            <div class="field local-ai-model-field">
+              <label for="aiModelSelect">Local AI model</label>
+              <select id="aiModelSelect"></select>
+              <p id="aiModelMeta" class="hint">Choose an installed model or download the latest Kimi variant.</p>
+            </div>
+
+            <fieldset class="field summary-detail-group">
+              <legend>Summary detail</legend>
+              <div class="summary-detail-options">
+                <label class="summary-detail-option">
+                  <input id="summaryDetailBrief" name="summaryDetail" type="radio" value="brief" />
+                  <span>Brief</span>
+                </label>
+                <label class="summary-detail-option">
+                  <input id="summaryDetailStandard" name="summaryDetail" type="radio" value="standard" />
+                  <span>Standard</span>
+                </label>
+                <label class="summary-detail-option">
+                  <input id="summaryDetailDetailed" name="summaryDetail" type="radio" value="detailed" />
+                  <span>Detailed</span>
+                </label>
+              </div>
+            </fieldset>
+
+            <section id="summaryPanel" class="summary-panel" hidden aria-live="polite" aria-atomic="true">
+              <div class="summary-panel-header">
+                <div>
+                  <p class="eyebrow">Generated locally</p>
+                  <h4 id="summaryPanelTitle">Local AI summary</h4>
+                </div>
+                <p id="summaryMeta" class="summary-meta"></p>
+              </div>
+              <div id="summaryContent" class="summary-content" tabindex="0">No summary yet.</div>
+              <div class="summary-panel-actions">
+                <button id="summaryCopyButton" class="button button-secondary" type="button">Copy summary</button>
+                <button id="summaryExpandButton" class="button button-secondary" type="button">Expand</button>
+                <button id="summaryDismissButton" class="button button-secondary" type="button">Dismiss summary</button>
+              </div>
+            </section>
+
+            <section id="chatPanel" class="chat-panel" hidden aria-labelledby="chatPanelTitle">
+              <div class="chat-panel-header">
+                <div>
+                  <p class="eyebrow">Context aware</p>
+                  <h4 id="chatPanelTitle">Local transcript chat</h4>
+                </div>
+                <p id="chatMeta" class="summary-meta">Add a transcript before chatting.</p>
+              </div>
+              <p id="chatStatus" class="chat-status" role="status" aria-live="polite">Add a transcript to start chatting.</p>
+              <ol id="chatHistory" class="chat-history" aria-live="polite" aria-atomic="false"></ol>
+              <form id="chatForm" class="chat-compose">
+                <label for="chatInput" class="sr-only">Ask a follow-up question</label>
+                <textarea id="chatInput" class="chat-input" rows="3" placeholder="Ask about action items, decisions, or missing context."></textarea>
+                <div class="chat-actions">
+                  <button id="chatSendButton" class="button button-accent" type="submit">Send</button>
+                  <button id="chatNewSessionButton" class="button button-secondary" type="button">Start new session</button>
+                  <button id="chatClearButton" class="button button-secondary" type="button">Clear chat</button>
+                </div>
+              </form>
+            </section>
+          </section>
 
           <div class="transcript-rows">
             <div class="transcript-row">

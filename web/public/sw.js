@@ -123,7 +123,7 @@ function offlineShell() {
   <body>
     <main class="card">
       <h1>Py Transcribe Studio</h1>
-      <p>The app shell is offline right now. Reconnect, then reload the page.</p>
+      <p>The app shell is offline right now. Reconnect, then try again.</p>
     </main>
   </body>
 </html>`,

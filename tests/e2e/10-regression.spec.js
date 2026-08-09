@@ -1,6 +1,7 @@
 import { test, expect } from './fixtures.js';
 import {
   createAudioFile,
+  installLocalAiRoutes,
   openApp,
   selectFilesViaButton,
   loadRuntime,
@@ -55,6 +56,27 @@ test.describe('Visual regression', () => {
     await selectFilesViaButton(page, [createAudioFile({ name: 'snapshot.wav' })]);
 
     await expect(page.locator('.toolbar')).toHaveScreenshot('toolbar-loaded.png', {
+      animations: 'disabled'
+    });
+  });
+
+  test('keeps the local AI panel stable after a summary is generated', async ({ page }) => {
+    await installLocalAiRoutes(page, {
+      models: [
+        {
+          name: 'rubenftenorio/kimi-k25-local',
+          details: { family: 'Kimi', parameter_size: '2.5B' }
+        }
+      ]
+    });
+
+    await openApp(page);
+    await selectFilesViaButton(page, [createAudioFile({ name: 'local-ai-panel.wav' })]);
+    await loadRuntime(page);
+    await transcribeCurrentFile(page);
+    await page.locator('#summarizeButton').click();
+
+    await expect(page.locator('.local-ai-panel')).toHaveScreenshot('local-ai-panel-ready.png', {
       animations: 'disabled'
     });
   });

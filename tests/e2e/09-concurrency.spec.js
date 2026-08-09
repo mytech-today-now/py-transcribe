@@ -32,7 +32,7 @@ test.describe('Concurrency', () => {
     await expect(page.locator('#cancelButton')).toBeEnabled();
     await expect(page.locator('#status')).toContainText(/preparing cancel-me\.wav/i);
 
-    await page.getByRole('button', { name: 'Cancel' }).click();
+    await page.locator('#cancelButton').click();
 
     await expect(page.locator('#status')).toContainText(/transcription cancelled/i);
     await expect(page.locator('#transcribeButton')).toBeEnabled();
@@ -40,17 +40,15 @@ test.describe('Concurrency', () => {
     await expect(page.locator('#transcriptPreview')).toContainText('Transcription cancelled');
   });
 
-  test('requires a reload after the selected model changes', async ({ page }) => {
-    await openApp(page);
+  test('auto-reloads the runtime after the selected model changes', async ({ page }) => {
+    await openApp(page, { whisperLoadDelayMs: 300 });
     await selectFilesViaButton(page, [createAudioFile({ name: 'model-change.wav' })]);
     await loadRuntime(page);
+    await expect(page.locator('#status')).toContainText(/pyodide and base whisper are ready/i);
 
     await page.locator('#modelSelect').selectOption('small');
-    await expect(page.locator('#status')).toContainText(/model changed/i);
-    await expect(page.locator('#runtimeBadge')).toHaveText('Idle');
-    await expect(page.locator('#transcribeButton')).toBeDisabled();
-
-    await loadRuntime(page);
     await expect(page.locator('#status')).toContainText(/pyodide and small whisper are ready/i);
+    await expect(page.locator('#runtimeBadge')).toHaveText('Loaded');
+    await expect(page.locator('#transcribeButton')).toBeEnabled();
   });
 });

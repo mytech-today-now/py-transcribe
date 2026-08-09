@@ -33,7 +33,7 @@ test.describe('Accessibility', () => {
     await expect(page.locator('#status')).toHaveAttribute('aria-live', 'polite');
     await expect(page.locator('#dropZone')).toHaveAttribute('type', 'button');
     await expect(page.locator('#dropZone')).toHaveAttribute('aria-describedby', 'dropHelp');
-    await expect(page.getByRole('button', { name: 'Reload Whisper / Python' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Load Whisper / Python' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Transcribe' })).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Record Mic' })).toBeVisible();
     await expect(page.locator('#fileState')).toHaveAttribute('hidden', '');

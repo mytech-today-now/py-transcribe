@@ -6,6 +6,16 @@ import { expect } from '@playwright/test';
 import JSZip from 'jszip';
 
 const DEFAULT_TRANSCRIPT_TEXT = 'Transcript from local Whisper';
+const DEFAULT_OLLAMA_PULL_LINES = [
+  { status: 'pulling manifest', total: 100, completed: 10 },
+  { status: 'pulling manifest', total: 100, completed: 60 },
+  { status: 'success', total: 100, completed: 100 }
+];
+const DEFAULT_OLLAMA_CHAT_LINES = [
+  { message: { content: 'Local summary.' }, done: false },
+  { message: { content: '\n- Main idea.' }, done: false },
+  { message: { content: '\n- Action item.' }, done: true }
+];
 
 export function createAudioFile({
   name = 'sample.wav',
@@ -68,6 +78,165 @@ export async function openApp(page, options = {}) {
   await page.locator('#status').waitFor({ state: 'visible' });
 }
 
+export async function installLocalAiRoutes(page, {
+  models = [],
+  pullLines = DEFAULT_OLLAMA_PULL_LINES,
+  chatLines = DEFAULT_OLLAMA_CHAT_LINES,
+  pullDelayMs = 0,
+  chatDelayMs = 0,
+  tagsDelayMs = 0,
+  proxyTagsStatus = 200
+} = {}) {
+  const requests = {
+    tags: [],
+    pull: [],
+    chat: []
+  };
+
+  const corsHeaders = {
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'GET,POST,OPTIONS',
+    'access-control-allow-headers': 'content-type',
+    'cache-control': 'no-store'
+  };
+
+  const jsonHeaders = {
+    ...corsHeaders,
+    'content-type': 'application/json; charset=utf-8'
+  };
+
+  const ndjsonHeaders = {
+    ...corsHeaders,
+    'content-type': 'application/x-ndjson; charset=utf-8'
+  };
+
+  const fulfillPreflight = async (route) => {
+    await route.fulfill({
+      status: 204,
+      headers: corsHeaders,
+      body: ''
+    });
+  };
+
+  const fulfillJson = async (route, payload, headers = jsonHeaders) => {
+    await route.fulfill({
+      status: 200,
+      headers,
+      body: JSON.stringify(payload)
+    });
+  };
+
+  const fulfillNdjson = async (route, lines, headers = ndjsonHeaders) => {
+    const body = `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`;
+    await route.fulfill({
+      status: 200,
+      headers,
+      body
+    });
+  };
+
+  await page.route(/\/api\/tags(?:\?.*)?$/i, async (route, request) => {
+    requests.tags.push({
+      method: request.method(),
+      url: request.url(),
+      kind: 'direct'
+    });
+
+    if (request.method() === 'OPTIONS') {
+      await fulfillPreflight(route);
+      return;
+    }
+
+    if (tagsDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, tagsDelayMs));
+    }
+
+    await fulfillJson(route, { models });
+  });
+
+  await page.route(/\/api\/ollama\/tags\.php(?:\?.*)?$/i, async (route, request) => {
+    requests.tags.push({
+      method: request.method(),
+      url: request.url(),
+      kind: 'proxy'
+    });
+
+    if (request.method() === 'OPTIONS') {
+      await fulfillPreflight(route);
+      return;
+    }
+
+    if (proxyTagsStatus !== 200) {
+      await route.fulfill({
+        status: proxyTagsStatus,
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          ok: false,
+          error: 'Ollama proxy unavailable.'
+        })
+      });
+      return;
+    }
+
+    if (tagsDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, tagsDelayMs));
+    }
+
+    await fulfillJson(route, { models });
+  });
+
+  await page.route(/\/api\/pull(?:\?.*)?$/i, async (route, request) => {
+    const payload = request.postDataJSON?.() ?? null;
+    requests.pull.push({
+      method: request.method(),
+      url: request.url(),
+      postData: payload
+    });
+
+    if (request.method() === 'OPTIONS') {
+      await fulfillPreflight(route);
+      return;
+    }
+
+    if (pullDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, pullDelayMs));
+    }
+
+    await fulfillNdjson(route, pullLines);
+
+    const pulledModelName = String(payload?.model || '').trim();
+    if (pulledModelName && !models.some((model) => String(model?.name || '').toLowerCase() === pulledModelName.toLowerCase())) {
+      models.push({
+        name: pulledModelName,
+        details: {
+          family: /kimi/i.test(pulledModelName) ? 'Kimi' : ''
+        }
+      });
+    }
+  });
+
+  await page.route(/\/api\/chat(?:\?.*)?$/i, async (route, request) => {
+    requests.chat.push({
+      method: request.method(),
+      url: request.url(),
+      postData: request.postDataJSON?.() ?? null
+    });
+
+    if (request.method() === 'OPTIONS') {
+      await fulfillPreflight(route);
+      return;
+    }
+
+    if (chatDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, chatDelayMs));
+    }
+
+    await fulfillNdjson(route, chatLines);
+  });
+
+  return requests;
+}
+
 export async function installAppHarness(page, options = {}) {
   const config = {
     whisperMode: 'ready',
@@ -78,12 +247,17 @@ export async function installAppHarness(page, options = {}) {
     renderDelayMs: 0,
     ffmpegLoadDelayMs: 0,
     ffmpegExecDelayMs: 0,
+    localAiAutoDownload: false,
     transcriptText: DEFAULT_TRANSCRIPT_TEXT,
     allowRealServiceWorker: false,
     ...options
   };
 
   await page.addInitScript(({ config: injectedConfig }) => {
+    window.__TRANSCRIBE_CONFIG__ = Object.assign(window.__TRANSCRIBE_CONFIG__ || {}, {
+      ...injectedConfig
+    });
+
     const state = window.__pyTranscribeTestState = {
       config: { ...injectedConfig },
       workers: [],
@@ -574,7 +748,7 @@ export async function dropFiles(page, selector, fileDescriptors) {
 }
 
 export async function loadRuntime(page) {
-  await page.getByRole('button', { name: 'Reload Whisper / Python' }).click();
+  await page.getByRole('button', { name: 'Load Whisper / Python' }).click();
 }
 
 export async function transcribeCurrentFile(page) {
