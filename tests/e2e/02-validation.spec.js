@@ -21,6 +21,7 @@ test.describe('File validation', () => {
 
     await expect(page.locator('#status')).toContainText(/unsupported file type/i);
     await expect(page.locator('#fileBadge')).toHaveText('Waiting');
+    await expect(page.locator('#fileState')).toHaveAttribute('hidden', '');
     await expect(page.locator('#fileSummary')).toContainText('No file selected yet');
   });
 
@@ -29,6 +30,7 @@ test.describe('File validation', () => {
 
     await expect(page.locator('#status')).toContainText(/file is empty/i);
     await expect(page.locator('#fileBadge')).toHaveText('Waiting');
+    await expect(page.locator('#fileState')).toHaveAttribute('hidden', '');
   });
 
   test('rejects oversized media files', async ({ page }) => {
@@ -36,6 +38,7 @@ test.describe('File validation', () => {
 
     await expect(page.locator('#status')).toContainText(/too large/i);
     await expect(page.locator('#fileBadge')).toHaveText('Waiting');
+    await expect(page.locator('#fileState')).toHaveAttribute('hidden', '');
     await expect(page.locator('#fileSummary')).toContainText('No file selected yet');
   });
 });

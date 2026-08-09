@@ -412,6 +412,72 @@ export async function installAppHarness(page, options = {}) {
       }
     }
 
+    class FakeMediaRecorder {
+      constructor(stream, options = {}) {
+        this.stream = stream;
+        this.mimeType = options.mimeType || 'audio/webm';
+        this.state = 'inactive';
+        this.ondataavailable = null;
+        this.onerror = null;
+        this.onstop = null;
+      }
+
+      static isTypeSupported() {
+        return true;
+      }
+
+      start() {
+        this.state = 'recording';
+      }
+
+      stop() {
+        if (this.state === 'inactive') {
+          return;
+        }
+
+        this.state = 'inactive';
+        queueMicrotask(() => {
+          if (typeof this.ondataavailable === 'function') {
+            this.ondataavailable({
+              data: new Blob([new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7])], { type: this.mimeType })
+            });
+          }
+
+          if (typeof this.onstop === 'function') {
+            this.onstop();
+          }
+        });
+      }
+    }
+
+    const fakeRecordingStream = {
+      getTracks: () => [{
+        stop: () => {}
+      }]
+    };
+
+    try {
+      Object.defineProperty(window, 'MediaRecorder', {
+        configurable: true,
+        value: FakeMediaRecorder
+      });
+    } catch {
+      window.MediaRecorder = FakeMediaRecorder;
+    }
+
+    try {
+      Object.defineProperty(window.navigator, 'mediaDevices', {
+        configurable: true,
+        value: {
+          getUserMedia: async () => fakeRecordingStream
+        }
+      });
+    } catch {
+      window.navigator.mediaDevices = {
+        getUserMedia: async () => fakeRecordingStream
+      };
+    }
+
     window.__PY_TRANSCRIBE_TEST_HOOKS__ = {
       createFFmpeg: () => new FakeFFmpeg(),
       fetchFile: async (file) => new Uint8Array(await file.arrayBuffer()),
@@ -452,7 +518,7 @@ export async function installAppHarness(page, options = {}) {
 
 export async function selectFilesViaButton(page, fileDescriptors) {
   const chooserPromise = page.waitForEvent('filechooser');
-  await page.locator('#browseButton').click();
+  await page.locator('#dropZone').click();
   const chooser = await chooserPromise;
   await chooser.setFiles(fileDescriptors.map((descriptor) => ({
     ...descriptor,
@@ -508,11 +574,21 @@ export async function dropFiles(page, selector, fileDescriptors) {
 }
 
 export async function loadRuntime(page) {
-  await page.getByRole('button', { name: 'Load Python / Whisper' }).click();
+  await page.getByRole('button', { name: 'Reload Whisper / Python' }).click();
 }
 
 export async function transcribeCurrentFile(page) {
-  await page.getByRole('button', { name: 'Transcribe media' }).click();
+  await page.getByRole('button', { name: 'Transcribe' }).click();
+}
+
+export async function recordMicrophoneClip(page, { holdForMs = 1100 } = {}) {
+  await page.getByRole('button', { name: 'Record Mic' }).click();
+  await expect(page.locator('#recordingState')).toContainText(/Recording/i);
+  await page.waitForTimeout(holdForMs);
+  await page.getByRole('button', { name: 'Stop Recording' }).click();
+  await expect(page.locator('#recordingState')).toContainText(/Ready to review/i);
+  await expect(page.locator('#recordingPreview')).toBeVisible();
+  await expect(page.locator('#fileSummary')).toContainText('recording-');
 }
 
 export async function waitForFileSelection(page, fileName) {

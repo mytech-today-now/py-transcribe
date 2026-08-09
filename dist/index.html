@@ -24,8 +24,8 @@
         clientLimitBytes: 134217728
       };
     </script>
-    <script type="module" crossorigin src="./assets/index--QQdWf5B.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-BsShkyMh.css">
+    <script type="module" crossorigin src="./assets/index-3CceHUmI.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-DkrA7Qvq.css">
   </head>
   <body>
     <div class="ambient ambient-left" aria-hidden="true"></div>
@@ -35,58 +35,68 @@
       <header class="hero card">
         <div class="hero-copy">
           <p class="eyebrow">Shared-hosting edition</p>
-          <h1 id="hero-title">Load Whisper locally, edit the transcript, and keep PHP light.</h1>
-          <p id="browserNote" class="lede">nothing is uploaded. everything stays in the browser unless you enable host backup.</p>
-        </div>
-
-        <div class="chip-grid" aria-label="Current app state">
-          <div class="chip">
-            <span class="chip-label">Runtime</span>
-            <strong id="runtimeState">Not loaded</strong>
-          </div>
-          <div class="chip">
-            <span class="chip-label">Device</span>
-            <strong id="deviceState">WASM fallback</strong>
-          </div>
-          <div class="chip">
-            <span class="chip-label">File</span>
-            <strong id="fileState">No file</strong>
-          </div>
-          <div class="chip">
-            <span class="chip-label">Output</span>
-            <strong id="outputState">Waiting</strong>
-          </div>
+          <h1 id="hero-title">Local Whisper, editable transcripts, lean PHP.</h1>
+          <p id="browserNote" class="lede">Everything stays local unless you enable host backup.</p>
         </div>
       </header>
 
       <article class="toolbar card" aria-labelledby="runtime-title">
         <h2 id="runtime-title" class="sr-only">Runtime controls</h2>
-        <div class="toolbar-row control-row">
-          <button id="loadRuntimeButton" class="button button-primary" type="button">Load Python / Whisper</button>
-          <button id="transcribeButton" class="button button-accent" type="button" disabled>Transcribe media</button>
-          <button id="cancelButton" class="button button-secondary" type="button" hidden>Cancel</button>
-        </div>
+        <div class="toolbar-stack">
+          <div class="toolbar-row toolbar-runtime-row">
+          <button id="loadRuntimeButton" class="button button-primary" type="button">Reload Whisper / Python</button>
+          <div class="toolbar-state toolbar-runtime">
+            <span class="toolbar-label">Runtime</span>
+            <strong id="runtimeState">Not loaded</strong>
+          </div>
+          </div>
 
-        <div class="toolbar-row secondary">
-          <button id="browseButton" class="button button-secondary" type="button">Choose audio</button>
-          <button id="recordButton" class="button button-secondary" type="button">Record mic</button>
-          <button id="dictateButton" class="button button-secondary" type="button">Dictate mic</button>
-          <label class="toggle">
+          <div class="toolbar-row toolbar-copy-row">
+          <label class="toggle toolbar-toggle">
             <input id="serverCopyToggle" type="checkbox" />
-            <span>Save a copy on this host</span>
+            <span>Save a local copy</span>
           </label>
+          </div>
+
+          <div class="toolbar-row toolbar-action-row">
+          <button id="transcribeButton" class="button button-accent" type="button" disabled>Transcribe</button>
+          <button id="cancelButton" class="button button-secondary" type="button" hidden>Cancel</button>
+          </div>
         </div>
       </article>
 
+      <div class="sr-only" aria-hidden="true">
+        <strong id="deviceState">WASM fallback</strong>
+        <strong id="outputState">Waiting</strong>
+        <strong id="runtimeBadge">Idle</strong>
+        <strong id="fileBadge">Waiting</strong>
+        <div id="fileState" hidden></div>
+      </div>
+
       <section class="grid">
-        <aside class="panel card">
-          <h2>Source</h2>
-          <div id="dropZone" class="drop-zone" tabindex="0" role="group" aria-describedby="dropHelp">
-            <p class="drop-zone-title">Drop WAV, MP3, M4A, WEBM, or OGG here</p>
-            <p class="drop-zone-copy">You can also record a clip from the microphone or browse for a file.</p>
-            <p id="dropHelp" class="sr-only">Press Enter or Space to browse for a file, or drag and drop media here.</p>
-            <input id="fileInput" type="file" accept="audio/*,.wav,.mp3,.m4a,.webm,.ogg,.flac,.aac,.mp4,.mov" hidden />
+        <aside class="panel card source-panel">
+          <div class="panel-heading">
+            <h2>Source</h2>
+            <p class="hint">Drop media or record a clip, tune the model, and keep backup storage compact.</p>
           </div>
+
+          <div class="source-actions">
+            <button id="dropZone" class="source-zone source-drop" type="button" aria-describedby="dropHelp">
+              <span class="source-zone-title">Drop WAV, MP3, MP4, WEBM, or OGG here</span>
+              <span class="source-zone-copy">Click to choose a file from this device, or drag one in.</span>
+            </button>
+
+            <div class="source-zone source-record">
+              <button id="recordButton" class="button button-secondary source-record-button" type="button" aria-pressed="false">Record Mic</button>
+              <p id="recordingState" class="recording-state" role="status" aria-live="polite">Mic idle</p>
+              <div id="recordingPreview" class="recording-preview" hidden>
+                <audio id="recordingPlayer" class="recording-player" controls preload="metadata" aria-label="Recorded microphone clip"></audio>
+                <p class="hint">Review the clip before transcribing it.</p>
+              </div>
+            </div>
+          </div>
+          <p id="dropHelp" class="sr-only">Press Enter or Space to open a file picker, or drag and drop media here.</p>
+          <input id="fileInput" type="file" accept="audio/*,.wav,.mp3,.m4a,.webm,.ogg,.flac,.aac,.mp4,.mov" hidden />
 
           <div class="field">
             <label for="modelSelect">Whisper model</label>
@@ -134,15 +144,8 @@
             </div>
           </div>
 
-          <div class="meta-grid">
-            <div class="meta-box">
-              <span class="meta-label">Runtime</span>
-              <strong id="runtimeBadge">Idle</strong>
-            </div>
-            <div class="meta-box">
-              <span class="meta-label">File</span>
-              <strong id="fileBadge">Waiting</strong>
-            </div>
+          <div class="field action-row">
+            <button id="dictateButton" class="button button-secondary" type="button">Dictate Mic</button>
           </div>
 
           <div class="meta-stack">
@@ -150,34 +153,16 @@
             <p>Source: <strong id="sourceValue">waiting</strong></p>
             <p>Runtime detail: <strong id="runtimeDetail">Whisper is not loaded yet.</strong></p>
             <p>Host storage: <strong id="serverBackupState">Host backup off</strong></p>
-            <p>Recording: <strong id="recordingState">Mic idle</strong></p>
           </div>
         </aside>
 
-        <section class="panel card">
+        <section class="panel card transcript-panel">
           <div class="panel-header">
             <div>
               <h2>Transcript</h2>
-              <p class="hint">Edit the plain transcript below. The timestamped preview updates separately.</p>
+              <p class="hint">Edit the transcript, then copy or export it when it’s ready.</p>
             </div>
             <button id="copyButton" class="button button-secondary" type="button">Copy transcript</button>
-          </div>
-
-          <div class="transcript-columns">
-            <div class="transcript-column">
-              <label for="transcriptPreview" class="transcript-label">Plain transcript</label>
-              <pre id="transcriptPreview" class="transcript-preview">No transcript yet.</pre>
-            </div>
-
-            <div class="transcript-column">
-              <label for="transcriptEditor" class="transcript-label">Editable transcript</label>
-              <textarea id="transcriptEditor" class="transcript-editor" rows="10" placeholder="Your transcript appears here. You can edit it before copying or exporting."></textarea>
-            </div>
-          </div>
-
-          <div class="transcript-column full">
-            <label for="timedPreview" class="transcript-label">Timestamped preview</label>
-            <pre id="timedPreview" class="timed-preview">No transcript yet.</pre>
           </div>
 
           <div class="download-row download-grid">
@@ -187,13 +172,28 @@
             <button id="downloadZipButton" class="button button-accent" type="button" disabled>Download transcript.zip</button>
           </div>
 
-          <p class="hint">Waiting</p>
+          <div class="transcript-rows">
+            <div class="transcript-row">
+              <label for="transcriptPreview" class="transcript-label">Plain transcript</label>
+              <pre id="transcriptPreview" class="transcript-preview">No transcript yet.</pre>
+            </div>
+
+            <div class="transcript-row">
+              <label for="transcriptEditor" class="transcript-label">Editable transcript</label>
+              <textarea id="transcriptEditor" class="transcript-editor" rows="10" placeholder="Your transcript appears here. You can edit it before copying or exporting."></textarea>
+            </div>
+
+            <div class="transcript-row">
+              <label for="timedPreview" class="transcript-label">Timestamped preview</label>
+              <pre id="timedPreview" class="timed-preview">No transcript yet.</pre>
+            </div>
+          </div>
         </section>
       </section>
 
       <footer class="footer card">
         <div class="footer-row">
-          <p id="status" role="status" aria-live="polite">Ready. Load Whisper, then choose a file.</p>
+          <p id="status" role="status" aria-live="polite">Ready. Reload Whisper, then choose a file.</p>
           <p class="fine-print">Local model inference runs in the browser. PHP only stores optional backups and serves the shell.</p>
         </div>
       </footer>

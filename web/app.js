@@ -90,7 +90,9 @@ const state = {
     recorder: null,
     chunks: [],
     timerId: null,
-    startedAt: 0
+    startedAt: 0,
+    previewUrl: '',
+    previewDurationSeconds: 0
   },
   dictation: {
     active: false,
@@ -124,7 +126,7 @@ function bootstrap() {
   registerEvents();
   registerServiceWorker();
   renderAll();
-  setStatus('Ready. Load the runtime, then choose a file.');
+  setStatus('Ready. Reload Whisper, then choose a file.');
 }
 
 function bindRefs() {
@@ -136,7 +138,6 @@ function bindRefs() {
     'fileState',
     'outputState',
     'loadRuntimeButton',
-    'browseButton',
     'recordButton',
     'dictateButton',
     'cancelButton',
@@ -169,6 +170,8 @@ function bindRefs() {
     'timedPreview',
     'serverBackupState',
     'recordingState',
+    'recordingPreview',
+    'recordingPlayer',
     'runtimeHint'
   ];
 
@@ -196,16 +199,21 @@ function populateSelectors() {
   refs.speakerTwo.value = state.settings.speakerNames[1];
   refs.serverCopyToggle.checked = Boolean(state.settings.serverCopy);
   refs.speakerNames.hidden = !state.settings.speakerMode;
-  refs.dictateButton.hidden = !supportsDictation();
+  const dictationSupported = supportsDictation();
+  refs.dictateButton.hidden = !dictationSupported;
+  refs.dictateButton.parentElement.hidden = !dictationSupported;
   refs.cancelButton.hidden = true;
-  refs.recordButton.textContent = 'Record mic';
-  refs.dictateButton.textContent = supportsDictation() ? 'Dictate mic' : 'Dictation unavailable';
+  refs.recordButton.textContent = 'Record Mic';
+  refs.recordButton.setAttribute('aria-pressed', 'false');
+  refs.dictateButton.textContent = dictationSupported ? 'Dictate Mic' : 'Dictation unavailable';
   refs.modelSelect.value = state.settings.modelKey;
   refs.languageSelect.value = state.settings.language;
   syncWhisperModelControls();
   updateRuntimeButtonLabel();
   updateTranscriptEditor();
   updateDownloadLabels();
+  updateRecordingPreview();
+  updateRecordingStatus();
 }
 
 function optionNode(value, label, selected = false) {
@@ -219,10 +227,6 @@ function optionNode(value, label, selected = false) {
 function registerEvents() {
   refs.loadRuntimeButton.addEventListener('click', () => {
     void loadRuntime();
-  });
-
-  refs.browseButton.addEventListener('click', () => {
-    refs.fileInput.click();
   });
 
   refs.fileInput.addEventListener('change', async () => {
@@ -250,12 +254,6 @@ function registerEvents() {
   });
   refs.dropZone.addEventListener('click', () => {
     refs.fileInput.click();
-  });
-  refs.dropZone.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' || event.key === ' ') {
-      preventDefaults(event);
-      refs.fileInput.click();
-    }
   });
 
   refs.recordButton.addEventListener('click', () => {
@@ -374,9 +372,7 @@ function preventDefaults(event) {
 }
 
 function updateRuntimeButtonLabel() {
-  refs.loadRuntimeButton.textContent = state.runtimeReady && !state.runtimeDirty
-    ? 'Reload Python / Whisper'
-    : 'Load Python / Whisper';
+  refs.loadRuntimeButton.textContent = 'Reload Whisper / Python';
 }
 
 function transcriptPreviewText() {
@@ -538,7 +534,11 @@ function teardownWorkers() {
   state.formatterClient = null;
 }
 
-async function handleFileSelection(file) {
+async function handleFileSelection(file, {
+  preserveRecordingPreview = false,
+  sourceLabel = '',
+  initialDurationSeconds = 0
+} = {}) {
   const validation = validateMediaFile(file, state.config.clientLimitBytes, { allowVideo: true });
   if (!validation.ok) {
     state.file = null;
@@ -549,6 +549,10 @@ async function handleFileSelection(file) {
     state.transcriptText = '';
     state.transcriptNotice = '';
     state.outputs = { txt: '', srt: '', vtt: '', preview: '' };
+    state.durationSeconds = 0;
+    if (!preserveRecordingPreview) {
+      clearRecordingPreview();
+    }
     setStatus(validation.message);
     refs.transcriptEditor.value = '';
     updateTranscriptPreview();
@@ -559,19 +563,22 @@ async function handleFileSelection(file) {
 
   state.file = file;
   state.fileKind = validation.kind;
-  state.fileSource = validation.kind === 'video' ? 'FFmpeg ready' : 'browser audio decode';
+  state.fileSource = sourceLabel || (validation.kind === 'video' ? 'FFmpeg ready' : 'browser audio decode');
   state.normalizedAudio = null;
   state.normalizedSampleRate = 16_000;
   state.segments = [];
   state.transcriptText = '';
   state.transcriptNotice = '';
   state.outputs = { txt: '', srt: '', vtt: '', preview: '' };
-  state.durationSeconds = 0;
+  state.durationSeconds = initialDurationSeconds;
   refs.fileInput.value = '';
   refs.transcriptEditor.value = '';
   updateTranscriptPreview();
   refs.timedPreview.textContent = 'No transcript yet.';
-  setStatus(`Selected ${file.name}. Load Whisper / Export to continue.`);
+  if (!preserveRecordingPreview) {
+    clearRecordingPreview();
+  }
+  setStatus(`Selected ${file.name}. Reload Whisper / Export to continue.`);
   persistSessionDraft();
   renderAll();
 
@@ -587,7 +594,7 @@ async function transcribeCurrentFile() {
   }
 
   if (!state.runtimeReady || !state.whisperClient || !state.formatterClient) {
-    setStatus('Load Whisper / Export before transcribing.');
+    setStatus('Reload Whisper / Export before transcribing.');
     return;
   }
 
@@ -819,24 +826,35 @@ function renderAll() {
     ? (state.fileSource || 'waiting')
     : 'waiting';
 
+  const toolbarFileLabel = state.recording.active
+    ? 'Recording mic'
+    : state.file
+      ? state.file.name
+      : '';
+  refs.fileState.textContent = toolbarFileLabel;
+  refs.fileState.hidden = !toolbarFileLabel;
+
   refs.fileSummary.textContent = state.file
     ? `${state.file.name} · ${formatBytes(state.file.size)}${state.durationSeconds ? ` · ${formatDuration(state.durationSeconds)}` : ''}`
     : 'No file selected yet.';
 
   refs.browserNote.textContent = state.settings.serverCopy
-    ? 'nothing is uploaded unless you choose a host backup.'
-    : 'nothing is uploaded. everything stays in the browser unless you enable host backup.';
+    ? 'Nothing leaves the browser unless you choose host backup.'
+    : 'Everything stays local unless you enable host backup.';
 
   refs.serverBackupState.textContent = state.settings.serverCopy
     ? (state.serverBackup ? `Saved to host: ${state.serverBackup.originalName}` : 'Host backup on')
     : 'Host backup off';
 
-  refs.recordingState.textContent = state.recording.active
-    ? `Recording ${formatDuration((performance.now() - state.recording.startedAt) / 1000)}`
-    : 'Mic idle';
+  updateRecordingStatus();
+  updateRecordingPreview();
 
-  refs.transcribeButton.disabled = !state.runtimeReady || !state.file || state.runtimeLoading || state.transcribing || state.runtimeDirty;
-  refs.recordButton.disabled = state.runtimeLoading || state.transcribing;
+  refs.transcribeButton.textContent = 'Transcribe';
+  refs.transcribeButton.disabled = !state.runtimeReady || !state.file || state.runtimeLoading || state.transcribing || state.runtimeDirty || state.recording.active;
+  refs.recordButton.textContent = state.recording.active ? 'Stop Recording' : 'Record Mic';
+  refs.recordButton.setAttribute('aria-pressed', String(state.recording.active));
+  refs.recordButton.disabled = state.runtimeLoading || state.transcribing || !supportsRecording();
+  refs.dropZone.disabled = state.runtimeLoading || state.transcribing || state.recording.active;
   refs.dictateButton.disabled = !supportsDictation() || state.runtimeLoading || state.transcribing;
   refs.loadRuntimeButton.disabled = state.runtimeLoading;
   refs.downloadTxtButton.disabled = !state.segments.length && !state.transcriptText;
@@ -883,6 +901,10 @@ function syncWhisperModelControls() {
 function renderDownloadState() {
   refs.downloadTxtButton.disabled = !refs.transcriptEditor.value;
   refs.copyButton.disabled = !refs.transcriptEditor.value;
+}
+
+function supportsRecording() {
+  return Boolean(window.MediaRecorder && navigator.mediaDevices?.getUserMedia);
 }
 
 function selectedModel() {
@@ -1170,7 +1192,7 @@ async function toggleDictation() {
   state.dictation.active = true;
   state.dictation.recognition = recognition;
   state.dictation.interim = '';
-  refs.dictateButton.textContent = 'Stop dictation';
+  refs.dictateButton.textContent = 'Stop Dictation';
   setStatus('Listening for speech...');
 
   recognition.onresult = (event) => {
@@ -1223,7 +1245,7 @@ function stopDictation() {
     // Ignore stop errors when the recognition session has already ended.
   }
   state.dictation.recognition = null;
-  refs.dictateButton.textContent = supportsDictation() ? 'Dictate mic' : 'Dictation unavailable';
+  refs.dictateButton.textContent = supportsDictation() ? 'Dictate Mic' : 'Dictation unavailable';
   setStatus('Dictation stopped.');
 }
 
@@ -1233,8 +1255,8 @@ async function toggleRecording() {
     return;
   }
 
-  if (!navigator.mediaDevices?.getUserMedia) {
-    setStatus('This browser cannot access the microphone.');
+  if (!supportsRecording()) {
+    setStatus('This browser cannot record audio.');
     return;
   }
 
@@ -1258,12 +1280,14 @@ async function toggleRecording() {
   state.recording.stream = stream;
   state.recording.recorder = recorder;
   state.recording.chunks = [];
+  clearRecordingPreview();
   state.recording.startedAt = performance.now();
-  refs.recordButton.textContent = 'Stop recording';
+  refs.recordButton.textContent = 'Stop Recording';
   setStatus('Recording audio from the microphone...');
+  renderAll();
   state.recording.timerId = window.setInterval(() => {
     if (state.recording.active) {
-      refs.recordingState.textContent = `Recording ${formatDuration((performance.now() - state.recording.startedAt) / 1000)}`;
+      updateRecordingStatus();
     }
   }, 1000);
 
@@ -1276,14 +1300,23 @@ async function toggleRecording() {
   recorder.onstop = async () => {
     const blob = new Blob(state.recording.chunks, { type: recorder.mimeType || 'audio/webm' });
     const extension = String(blob.type).includes('mp4') ? 'm4a' : 'webm';
+    const durationSeconds = Math.max(0, (performance.now() - state.recording.startedAt) / 1000);
     const file = new File([blob], `recording-${new Date().toISOString().replace(/[:.]/g, '-')}.${extension}`, {
       type: blob.type || 'audio/webm',
       lastModified: Date.now()
     });
 
     finalizeRecording();
-    await handleFileSelection(file);
-    setStatus('Recording saved. You can transcribe it now.');
+    state.recording.previewDurationSeconds = durationSeconds;
+    state.recording.previewUrl = URL.createObjectURL(blob);
+    updateRecordingPreview();
+    updateRecordingStatus();
+    await handleFileSelection(file, {
+      preserveRecordingPreview: true,
+      sourceLabel: 'microphone recording',
+      initialDurationSeconds: durationSeconds
+    });
+    setStatus('Recording saved. Review it before transcribing.');
   };
 
   recorder.start();
@@ -1295,7 +1328,8 @@ function stopRecording() {
   }
 
   state.recording.active = false;
-  refs.recordButton.textContent = 'Record mic';
+  refs.recordButton.textContent = 'Record Mic';
+  renderAll();
 
   try {
     state.recording.recorder?.stop();
@@ -1314,7 +1348,7 @@ function finalizeRecording() {
   state.recording.recorder = null;
   state.recording.chunks = [];
   state.recording.active = false;
-  refs.recordButton.textContent = 'Record mic';
+  refs.recordButton.textContent = 'Record Mic';
 }
 
 function speechLocaleFor(language) {
@@ -1335,4 +1369,48 @@ function speechLocaleFor(language) {
   };
 
   return locales[String(language || 'auto').toLowerCase()] || 'en-US';
+}
+
+function updateRecordingStatus() {
+  if (state.recording.active) {
+    refs.recordingState.dataset.mode = 'active';
+    refs.recordingState.textContent = `Recording ${formatDuration((performance.now() - state.recording.startedAt) / 1000)}`;
+    return;
+  }
+
+  if (state.recording.previewUrl) {
+    refs.recordingState.dataset.mode = 'ready';
+    refs.recordingState.textContent = `Ready to review ${formatDuration(state.recording.previewDurationSeconds || 0)}.`;
+    return;
+  }
+
+  refs.recordingState.dataset.mode = 'idle';
+  refs.recordingState.textContent = 'Mic idle';
+}
+
+function updateRecordingPreview() {
+  const hasPreview = Boolean(state.recording.previewUrl);
+  refs.recordingPreview.hidden = !hasPreview;
+
+  if (!hasPreview) {
+    refs.recordingPlayer.removeAttribute('src');
+    refs.recordingPlayer.load?.();
+    return;
+  }
+
+  if (refs.recordingPlayer.src !== state.recording.previewUrl) {
+    refs.recordingPlayer.src = state.recording.previewUrl;
+    refs.recordingPlayer.load?.();
+  }
+}
+
+function clearRecordingPreview() {
+  if (state.recording.previewUrl) {
+    URL.revokeObjectURL(state.recording.previewUrl);
+  }
+
+  state.recording.previewUrl = '';
+  state.recording.previewDurationSeconds = 0;
+  updateRecordingPreview();
+  updateRecordingStatus();
 }

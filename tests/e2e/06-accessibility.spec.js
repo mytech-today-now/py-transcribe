@@ -14,6 +14,7 @@ test.describe('Accessibility', () => {
     await chooser.setFiles([createAudioFile({ name: 'keyboard-enter.wav' })]);
 
     await expect(page.locator('#fileSummary')).toContainText('keyboard-enter.wav');
+    await expect(page.locator('#fileState')).toContainText('keyboard-enter.wav');
   });
 
   test('pressing Space on the drop zone opens the native file chooser', async ({ page }) => {
@@ -24,17 +25,21 @@ test.describe('Accessibility', () => {
     await chooser.setFiles([createAudioFile({ name: 'keyboard-space.wav' })]);
 
     await expect(page.locator('#fileSummary')).toContainText('keyboard-space.wav');
+    await expect(page.locator('#fileState')).toContainText('keyboard-space.wav');
   });
 
   test('exposes the expected ARIA hooks for status and browsing', async ({ page }) => {
     await expect(page.locator('#status')).toHaveAttribute('role', 'status');
     await expect(page.locator('#status')).toHaveAttribute('aria-live', 'polite');
-    await expect(page.locator('#dropZone')).toHaveAttribute('role', 'group');
+    await expect(page.locator('#dropZone')).toHaveAttribute('type', 'button');
     await expect(page.locator('#dropZone')).toHaveAttribute('aria-describedby', 'dropHelp');
-    await expect(page.getByRole('button', { name: 'Load Python / Whisper' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Transcribe media' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Reload Whisper / Python' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Transcribe' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Record Mic' })).toBeVisible();
+    await expect(page.locator('#fileState')).toHaveAttribute('hidden', '');
 
     await selectFilesViaButton(page, [createAudioFile({ name: 'aria-check.wav' })]);
     await expect(page.locator('#fileBadge')).toHaveText('Audio');
+    await expect(page.locator('#fileState')).toContainText('aria-check.wav');
   });
 });

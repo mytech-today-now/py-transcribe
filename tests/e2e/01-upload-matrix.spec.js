@@ -49,6 +49,7 @@ test.describe('Upload matrix', () => {
       }
 
       await waitForFileSelection(page, testCase.file.name);
+      await expect(page.locator('#fileState')).toContainText(testCase.file.name);
       await expect(page.locator('#fileBadge')).toHaveText(testCase.kindLabel);
       await expect(page.locator('#fileSummary')).toContainText(testCase.file.name);
       await expect(page.locator('#status')).toContainText(`Selected ${testCase.file.name}`);
