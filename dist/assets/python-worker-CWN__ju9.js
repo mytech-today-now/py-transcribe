@@ -1,0 +1,17 @@
+const l=["Speaker 1","Speaker 2"];function c(t,n=","){const e=Math.max(0,Math.round((Number(t)||0)*1e3)),o=Math.floor(e/36e5),s=Math.floor(e%36e5/6e4),r=Math.floor(e%6e4/1e3),a=e%1e3;return[String(o).padStart(2,"0"),String(s).padStart(2,"0"),String(r).padStart(2,"0")].join(":")+`${n}${String(a).padStart(3,"0")}`}function u(t){const n=String(t??"").replace(/\r\n?/g,`
+`).trim();return n?n.split(/\n{2,}/).map(e=>e.replace(/[ \t]+/g," ").replace(/\s+([,.;:!?])/g,"$1").replace(/([,.;:!?])(?![\s"')\]\}])/g,"$1 ").replace(/\s+/g," ").trim()).filter(Boolean).join(`
+
+`).trim():""}function f(t,{cleanup:n=!1,speakerMode:e=!1,speakerNames:o=l}={}){const s=[];for(const[r,a]of(Array.isArray(t)?t:[]).entries()){const i=n?u(a?.text):String(a?.text??"").trim();if(i)if(e){const p=a?.speakerLabel||o[r%o.length]||`Speaker ${r+1}`;s.push(`[${p}] ${i}`)}else s.push(i)}return s.join(`
+
+`).trim()}function k(t,{cleanup:n=!1,speakerMode:e=!1,speakerNames:o=l,includeTimestamps:s=!0}={}){const r=d(t,e,o);return s?r.length?r.map(a=>{const i=c(a.start,"."),p=c(a.end,"."),m=n?u(a.text):String(a.text??"").trim(),S=a.speakerLabel?`[${a.speakerLabel}] `:"";return`[${i} - ${p}] ${S}${m}`.trim()}).join(`
+`):"No transcript yet.":f(r,{cleanup:n,speakerMode:e,speakerNames:o})}function g(t,{cleanup:n=!1,speakerMode:e=!1,speakerNames:o=l}={}){const s=d(t,e,o);return s.length?s.map((r,a)=>{const i=n?u(r.text):String(r.text??"").trim(),p=r.speakerLabel?`[${r.speakerLabel}] `:"";return[String(a+1),`${c(r.start,",")} --> ${c(r.end,",")}`,`${p}${i}`.trim()].join(`
+`)}).join(`
+
+`):`1
+00:00:00,000 --> 00:00:01,000
+No transcript yet.`}function y(t,{cleanup:n=!1,speakerMode:e=!1,speakerNames:o=l}={}){const s=d(t,e,o);return s.length?["WEBVTT","",...s.map(r=>{const a=n?u(r.text):String(r.text??"").trim(),i=r.speakerLabel?`[${r.speakerLabel}] `:"";return[`${c(r.start,".")} --> ${c(r.end,".")}`,`${i}${a}`.trim(),""].join(`
+`)})].join(`
+`).trimEnd():`WEBVTT
+
+00:00:00.000 --> 00:00:01.000
+No transcript yet.`}function d(t,n=!1,e=l){const o=[],s=Array.isArray(e)&&e.length>0?e.map((r,a)=>String(r||`Speaker ${a+1}`).trim()||`Speaker ${a+1}`):l;for(const[r,a]of(Array.isArray(t)?t:[]).entries()){const i=String(a?.text??"").trim();i&&o.push({...a,text:i,speakerLabel:n?s[r%s.length]:""})}return o}self.addEventListener("message",async t=>{const n=t.data??{};try{if(n.type==="init"){self.postMessage({id:n.id,type:"ready"});return}if(n.type==="render"){const e=n.payload??{},o=$(e.speakerNames,e.speakerMode),s=d(e.segments??[],!!e.speakerMode,o),r=e.editorText!=null?String(e.editorText):f(s,{cleanup:!!e.cleanup,speakerMode:!!e.speakerMode,speakerNames:o}),a=g(s,{cleanup:!!e.cleanup,speakerMode:!!e.speakerMode,speakerNames:o}),i=y(s,{cleanup:!!e.cleanup,speakerMode:!!e.speakerMode,speakerNames:o}),p=k(s,{cleanup:!!e.cleanup,speakerMode:!!e.speakerMode,speakerNames:o,includeTimestamps:!!e.timestamps});self.postMessage({id:n.id,type:"result",result:{txt:r,srt:a,vtt:i,preview:p}});return}self.postMessage({id:n.id,type:"error",error:{name:"Error",message:`Unsupported formatter worker message: ${String(n.type)}`}})}catch(e){self.postMessage({id:n.id,type:"error",error:x(e)})}});function $(t,n){const e=Array.isArray(t)?t:[];if(!n)return e;const o=String(e[0]||"Speaker 1").trim()||"Speaker 1",s=String(e[1]||"Speaker 2").trim()||"Speaker 2";return[o,s]}function x(t){return t instanceof Error?{name:t.name,message:t.message}:{name:"Error",message:String(t?.message||t||"Formatter worker error.")}}

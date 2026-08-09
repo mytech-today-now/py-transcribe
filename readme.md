@@ -1,125 +1,94 @@
 # py-transcribe
 
-Local audio transcription and English translation with OpenAI Whisper.
+Browser-first transcription studio for constrained shared hosting. The browser handles audio decoding, Whisper inference, transcript editing, and exports. PHP only serves the shell, optional session protection, and optional host-side uploads/downloads.
 
-Transcribe audio files on your own machine. Your audio stays local, there are no API keys to manage, and you can use the project either from Python or with the bundled Windows executable.
+## Architecture Overview
 
-## Highlights
-
-- Runs locally with Whisper
-- Supports multiple model sizes: `tiny`, `base`, `small`, `medium`, `large`, `large-v2`, and `large-v3`
-- Auto-detects language, or you can force a specific one
-- Can transcribe speech or translate it to English
-- Works in interactive mode or from the command line
-- Supports drag-and-drop on Windows through the included shortcut
-- Includes a pre-built Windows `.exe` for users who do not want to install Python
-
-## Requirements
-
-- Python 3.8 or newer
-- `openai-whisper`
-- `ffmpeg` available on your `PATH`
-
-Install Whisper with:
-
-```powershell
-python -m pip install -U openai-whisper
+```mermaid
+flowchart LR
+  A[Browser UI] --> B[Audio decode / FFmpeg fallback]
+  B --> C[Whisper worker]
+  C --> D[Editable transcript + subtitle exports]
+  D --> E[TXT / SRT / VTT / ZIP downloads]
+  A --> F[Optional PHP upload / download / session protection]
+  F --> G[Shared hosting storage]
 ```
 
-Note: Whisper downloads model files the first time you use a model, so the initial run may need internet access. After that, transcription runs locally.
+## Chosen Tech Stack
 
-## Quick Start
+- `Vite` for fast local development and a small production bundle.
+- Vanilla JavaScript for minimal browser overhead and easy shared-hosting deployment.
+- `@huggingface/transformers` for browser-side Whisper inference.
+- `@ffmpeg/ffmpeg` and `@ffmpeg/util` for codec fallback when the browser cannot decode a file directly.
+- `JSZip` for client-side packaging of export files.
+- PHP for static shell serving, optional session auth, and simple upload/download endpoints.
 
-Run the script with no arguments to use the interactive prompts:
+## File Structure
 
-```powershell
-python transcribe.py
+```text
+web/
+  app.js
+  index.html
+  styles.css
+  lib/
+  workers/
+  public/
+    index.php
+    api/
+    sw.js
+    .htaccess
+    storage/
+tests/
+  unit/
+  e2e/
+vite.config.mjs
+playwright.config.mjs
+package.json
 ```
 
-You will be asked for the audio file and the output location.
+## Deployment Guide
 
-## Command-Line Usage
+1. Install dependencies locally.
+   ```powershell
+   npm install
+   ```
+2. Build the browser bundle.
+   ```powershell
+   npm run build
+   ```
+3. Upload the contents of `dist/` into `web/public/` on your shared host, or into the site root if your panel uses a different document root.
+4. Keep the PHP files and `.htaccess` files from `web/public/` in the same web directory as the generated `index.html` and `assets/` folder.
+5. If you want password protection, set `APP_PASSWORD_HASH` in [`web/public/api/bootstrap.php`](./web/public/api/bootstrap.php) to a `password_hash()` value.
+6. Make sure the web user can write to `web/public/storage/` for optional backups.
+7. Visit the site. The PHP entrypoint will inject runtime config into the built HTML and serve the app shell.
 
-```powershell
-python transcribe.py "C:\audio\interview.mp3"
-python transcribe.py --input "C:\audio\interview.mp3" --output "C:\transcripts\interview.txt"
-python transcribe.py --input "C:\audio\meeting.m4a" --model medium --language en
-python transcribe.py --input "C:\audio\meeting.m4a" --task translate --language es
-```
+The shared host’s `/usr/local/python-3.5` paths are not used by this app. No server-side Python runtime is required.
 
-You can provide the input file either positionally or with `--input`, but not both.
+## Usage
 
-If you omit `--output`, the app suggests a default transcript or translation path next to the audio file and lets you accept it or type a different one.
+1. Open the app in a modern browser.
+2. Click `Load Python / Whisper`.
+3. Drop a file, browse for one, or record from the microphone.
+4. Pick the model, language, task, and cleanup options.
+5. Click `Transcribe media`.
+6. Edit the transcript and download TXT, SRT, VTT, or ZIP outputs.
 
-## Options
+## Limitations
 
-| Flag | Description | Default |
-| --- | --- | --- |
-| `input_file` | Optional positional audio file | Prompted |
-| `-i`, `--input` | Path to the audio file | Prompted |
-| `-o`, `--output` | Path for the transcript or translation text file | `<input>_transcript.txt` or `<input>_translation.txt` |
-| `-m`, `--model` | Whisper model size | `base` |
-| `-l`, `--language` | Source language code such as `en`, `es`, or `fr` | Auto-detect |
-| `--task` | `transcribe` or `translate` to English | `transcribe` |
-| `--pause` | Wait for Enter before closing the console | Off |
-
-## Windows
-
-For a ready-to-run Windows build:
-
-1. Download the ZIP from `https://mytech.today/tools/downloads/py-transcribe.zip`
-2. Extract it
-3. Run `transcribe.exe` or use `transcribe.lnk`
-
-The shortcut is useful for drag-and-drop. If you drop an audio file on it, the console stays open after the transcription or translation finishes.
-
-See `windows.md` for the lightweight download landing page used by the packaged build.
-
-## Build From Source
-
-If you want to build the Windows executable yourself:
-
-```powershell
-.\build_windows.ps1
-```
-
-Build requirements:
-
-- Python 3.12
-- PyInstaller
-- `ffmpeg` on your `PATH`
-
-The script creates:
-
-- `dist\transcribe.exe`
-- `dist\transcribe.lnk`
-
-## Output
-
-Each output file is saved as plain text and includes:
-
-- Detected language
-- Processing time
-- The transcription or translation text itself
-
-When you use `--task translate`, the saved file contains English translation text and the default filename changes to `<input>_translation.txt`.
-
-## Web Pages
-
-This repository also includes a static web UI in `web/`:
-
-- `web/index.html` for the local file-to-text converter
-- `web/guide.html` for the output structure and usage reference
-
-Open either page in a browser if you want a simple, browser-only workflow for turning a file into a downloadable `.txt` report.
+- First load still depends on downloading Whisper model files and browser worker assets.
+- Very large or exotic media files can still be slow or fail in some browsers.
+- Speaker labels are heuristic and not a true diarization system.
+- Translation mode changes the transcript presentation, but it is still browser-side inference with no paid API.
 
 ## Troubleshooting
 
-- If you see an `ffmpeg` error, make sure `ffmpeg.exe` is installed and available on your `PATH`.
-- If model loading is slow the first time, Whisper is downloading model files.
-- Smaller models are faster; larger models are slower but usually more accurate.
+- If the console shows `Failed to resolve module specifier "jszip"`, the host is serving source files instead of the built bundle. Upload the generated `dist/` output and make sure `index.php` or `index.html` on the host comes from that build, not from `web/`.
+- If the app opens on `index.html` instead of the PHP shell, double-check the host’s `DirectoryIndex` order and keep the `.htaccess` file in place.
 
-## License
+## Testing Checklist
 
-This project is provided as-is.
-OpenAI Whisper is released under the MIT License.
+- `npm test`
+- `npm run build`
+- `npx playwright test`
+- Confirm the app loads, accepts audio/video, transcribes, and downloads exports.
+- Confirm the optional PHP shell still serves the built `index.html` and `assets/` bundle.

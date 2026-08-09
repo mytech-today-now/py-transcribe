@@ -1,132 +1,202 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#eef3f8">
-  <meta name="description" content="Convert any file into a downloadable plain-text summary directly in your browser.">
-  <title>File to Text Converter</title>
-  <link rel="stylesheet" href="styles.css">
-</head>
-<body data-page="converter">
-  <main class="shell">
-    <header class="topbar">
-      <div class="brand" aria-label="File to Text Converter">
-        <div class="brand-mark" aria-hidden="true">TXT</div>
-        <div class="brand-text">
-          <strong>File to Text</strong>
-          <span>local, instant, no upload</span>
-        </div>
-      </div>
-      <nav class="nav-links" aria-label="Primary">
-        <a href="#workspace">Converter</a>
-        <a href="guide.html">Guide</a>
-      </nav>
-    </header>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="description" content="A browser-first transcription studio for shared PHP hosting." />
+    <title>Py Transcribe Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <script>
+      window.__TRANSCRIBE_CONFIG__ = window.__TRANSCRIBE_CONFIG__ || {
+        appName: 'Py Transcribe Studio',
+        uploadEndpoint: 'api/upload.php',
+        downloadEndpoint: 'api/download.php',
+        csrfToken: '',
+        authRequired: false,
+        storageEnabled: true,
+        uploadLimitBytes: 16777216,
+        clientLimitBytes: 134217728
+      };
+    </script>
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <div class="ambient ambient-left" aria-hidden="true"></div>
+    <div class="ambient ambient-right" aria-hidden="true"></div>
 
-    <section class="hero" aria-labelledby="hero-title">
-      <div class="hero-copy panel">
-        <p class="eyebrow"><span class="dot" aria-hidden="true"></span> Browser-only file conversion</p>
-        <h1 id="hero-title">Turn any file into a clean .txt download.</h1>
-        <p class="lede">
-          Choose a file or drop one on the page. The browser builds a plain-text report locally and downloads it
-          immediately as <code class="inline-code">filename-processed.txt</code>.
-        </p>
-        <div class="tag-row" aria-label="Highlights">
-          <span class="tag"><strong>Local</strong> only</span>
-          <span class="tag"><strong>One</strong> file at a time</span>
-          <span class="tag"><strong>Auto</strong> download</span>
+    <main class="shell">
+      <header class="hero card">
+        <div class="hero-copy">
+          <p class="eyebrow">Shared-hosting edition</p>
+          <h1 id="hero-title">Load Whisper locally, edit the transcript, and keep PHP light.</h1>
+          <p id="browserNote" class="lede">nothing is uploaded. everything stays in the browser unless you enable host backup.</p>
         </div>
-      </div>
 
-      <aside class="hero-card" aria-label="What the text file includes">
-        <h2>What goes into the text file</h2>
-        <p>
-          Every download includes the filename, size, MIME type, and a useful representation of the file contents.
-          Text files are extracted in full. Images, PDFs, and other binary files get a structured metadata summary
-          with a byte preview.
-        </p>
-        <div class="stat-row">
-          <span class="stat-tag"><strong>Text</strong> fully extracted</span>
-          <span class="stat-tag"><strong>Images</strong> summarized</span>
-          <span class="stat-tag"><strong>Binary</strong> previewed</span>
-        </div>
-        <div class="hero-note">
-          <strong>Privacy:</strong> everything stays in your browser. Nothing is uploaded to a server.
-        </div>
-      </aside>
-    </section>
-
-    <section class="details" id="workspace" aria-labelledby="workspace-title">
-      <article class="panel">
-        <div class="panel__head">
-          <div>
-            <p class="section-kicker">1. Select</p>
-            <h2 class="section-title" id="workspace-title">Choose a file</h2>
-            <p class="section-copy">Use the button or drag and drop. The interface only processes one file at a time.</p>
+        <div class="chip-grid" aria-label="Current app state">
+          <div class="chip">
+            <span class="chip-label">Runtime</span>
+            <strong id="runtimeState">Not loaded</strong>
           </div>
-          <span id="fileKindBadge" class="panel__badge panel__badge--idle">Waiting</span>
-        </div>
-
-        <div
-          id="dropZone"
-          class="dropzone"
-          role="button"
-          tabindex="0"
-          aria-label="File drop zone. Press Enter or Space to browse files, or drag a file here."
-          aria-describedby="dropHelp"
-        >
-          <div class="dropzone__icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" focusable="false">
-              <path d="M7 3.5h7l4.5 4.5V20.5H7z"></path>
-              <path d="M14 3.5V8h4.5"></path>
-              <path d="M12 11v6"></path>
-              <path d="M9.5 14.5L12 17l2.5-2.5"></path>
-            </svg>
+          <div class="chip">
+            <span class="chip-label">Device</span>
+            <strong id="deviceState">WASM fallback</strong>
           </div>
-          <div class="dropzone__copy">
-            <p class="dropzone__title">Drop a file here</p>
-            <p id="dropHelp" class="dropzone__text">or browse to pick a file from your device.</p>
+          <div class="chip">
+            <span class="chip-label">File</span>
+            <strong id="fileState">No file</strong>
           </div>
-          <div class="dropzone__actions">
-            <button id="browseButton" class="ghost" type="button">Browse files</button>
+          <div class="chip">
+            <span class="chip-label">Output</span>
+            <strong id="outputState">Waiting</strong>
           </div>
         </div>
+      </header>
 
-        <input id="fileInput" class="visually-hidden" type="file" accept="*/*" tabindex="-1">
+      <article class="toolbar card" aria-labelledby="runtime-title">
+        <h2 id="runtime-title" class="sr-only">Runtime controls</h2>
+        <div class="toolbar-row control-row">
+          <button id="loadRuntimeButton" class="button button-primary" type="button">Load Python / Whisper</button>
+          <button id="transcribeButton" class="button button-accent" type="button" disabled>Transcribe media</button>
+          <button id="cancelButton" class="button button-secondary" type="button" hidden>Cancel</button>
+        </div>
 
-        <div id="fileSummary" class="summary" aria-live="polite" aria-atomic="true">
-          <p class="empty-state">No file selected yet.</p>
+        <div class="toolbar-row secondary">
+          <button id="browseButton" class="button button-secondary" type="button">Choose audio</button>
+          <button id="recordButton" class="button button-secondary" type="button">Record mic</button>
+          <button id="dictateButton" class="button button-secondary" type="button">Dictate mic</button>
+          <label class="toggle">
+            <input id="serverCopyToggle" type="checkbox" />
+            <span>Save a copy on this host</span>
+          </label>
         </div>
       </article>
 
-      <aside class="panel panel--action" aria-labelledby="download-title">
-        <div class="panel__head">
-          <div>
-            <p class="section-kicker">2. Download</p>
-            <h2 class="section-title" id="download-title">Create the .txt file</h2>
-            <p class="section-copy">Click once. The browser downloads the result and resets the interface for the next file.</p>
+      <section class="grid">
+        <aside class="panel card">
+          <h2>Source</h2>
+          <div id="dropZone" class="drop-zone" tabindex="0" role="group" aria-describedby="dropHelp">
+            <p class="drop-zone-title">Drop WAV, MP3, M4A, WEBM, or OGG here</p>
+            <p class="drop-zone-copy">You can also record a clip from the microphone or browse for a file.</p>
+            <p id="dropHelp" class="sr-only">Press Enter or Space to browse for a file, or drag and drop media here.</p>
+            <input id="fileInput" type="file" accept="audio/*,.wav,.mp3,.m4a,.webm,.ogg,.flac,.aac,.mp4,.mov" hidden />
           </div>
+
+          <div class="field">
+            <label for="modelSelect">Whisper model</label>
+            <select id="modelSelect"></select>
+            <p id="runtimeHint" class="hint">Fastest option for English audio.</p>
+          </div>
+
+          <div class="field split">
+            <div>
+              <label for="taskSelect">Task</label>
+              <select id="taskSelect">
+                <option value="transcribe">Transcribe</option>
+                <option value="translate">Translate to English</option>
+              </select>
+            </div>
+            <div>
+              <label for="languageSelect">Language</label>
+              <select id="languageSelect"></select>
+            </div>
+          </div>
+
+          <div class="field switches">
+            <label class="toggle">
+              <input id="cleanupToggle" type="checkbox" checked />
+              <span>Cleanup punctuation</span>
+            </label>
+            <label class="toggle">
+              <input id="timestampsToggle" type="checkbox" checked />
+              <span>Show timestamps</span>
+            </label>
+            <label class="toggle">
+              <input id="speakerToggle" type="checkbox" />
+              <span>Speaker labels</span>
+            </label>
+          </div>
+
+          <div id="speakerNames" class="field speaker-names" hidden>
+            <div>
+              <label for="speakerOne">Speaker 1</label>
+              <input id="speakerOne" type="text" value="Speaker 1" />
+            </div>
+            <div>
+              <label for="speakerTwo">Speaker 2</label>
+              <input id="speakerTwo" type="text" value="Speaker 2" />
+            </div>
+          </div>
+
+          <div class="meta-grid">
+            <div class="meta-box">
+              <span class="meta-label">Runtime</span>
+              <strong id="runtimeBadge">Idle</strong>
+            </div>
+            <div class="meta-box">
+              <span class="meta-label">File</span>
+              <strong id="fileBadge">Waiting</strong>
+            </div>
+          </div>
+
+          <div class="meta-stack">
+            <p id="fileSummary" class="summary">No file selected yet.</p>
+            <p>Source: <strong id="sourceValue">waiting</strong></p>
+            <p>Runtime detail: <strong id="runtimeDetail">Whisper is not loaded yet.</strong></p>
+            <p>Host storage: <strong id="serverBackupState">Host backup off</strong></p>
+            <p>Recording: <strong id="recordingState">Mic idle</strong></p>
+          </div>
+        </aside>
+
+        <section class="panel card">
+          <div class="panel-header">
+            <div>
+              <h2>Transcript</h2>
+              <p class="hint">Edit the plain transcript below. The timestamped preview updates separately.</p>
+            </div>
+            <button id="copyButton" class="button button-secondary" type="button">Copy transcript</button>
+          </div>
+
+          <div class="transcript-columns">
+            <div class="transcript-column">
+              <label for="transcriptPreview" class="transcript-label">Plain transcript</label>
+              <pre id="transcriptPreview" class="transcript-preview">No transcript yet.</pre>
+            </div>
+
+            <div class="transcript-column">
+              <label for="transcriptEditor" class="transcript-label">Editable transcript</label>
+              <textarea id="transcriptEditor" class="transcript-editor" rows="10" placeholder="Your transcript appears here. You can edit it before copying or exporting."></textarea>
+            </div>
+          </div>
+
+          <div class="transcript-column full">
+            <label for="timedPreview" class="transcript-label">Timestamped preview</label>
+            <pre id="timedPreview" class="timed-preview">No transcript yet.</pre>
+          </div>
+
+          <div class="download-row download-grid">
+            <button id="downloadTxtButton" class="button button-secondary" type="button" disabled>Download transcript.txt</button>
+            <button id="downloadSrtButton" class="button button-secondary" type="button" disabled>Download transcript.srt</button>
+            <button id="downloadVttButton" class="button button-secondary" type="button" disabled>Download transcript.vtt</button>
+            <button id="downloadZipButton" class="button button-accent" type="button" disabled>Download transcript.zip</button>
+          </div>
+
+          <p class="hint">Waiting</p>
+        </section>
+      </section>
+
+      <footer class="footer card">
+        <div class="footer-row">
+          <p id="status" role="status" aria-live="polite">Ready. Load Whisper, then choose a file.</p>
+          <p class="fine-print">Local model inference runs in the browser. PHP only stores optional backups and serves the shell.</p>
         </div>
-
-        <button id="generateButton" class="primary" type="button" disabled aria-describedby="outputHint">
-          Create and download .txt
-        </button>
-
-        <p class="panel__note">
-          The output will be named <code id="outputHint">filename-processed.txt</code>.
-        </p>
-        <p class="panel__note">
-          The download uses the browser's native save flow. Nothing leaves your device.
-        </p>
-      </aside>
-    </section>
-
-    <p id="status" class="status status--idle" role="status" aria-live="polite" aria-atomic="true">
-      Ready. Choose a file or drag one into the zone.
-    </p>
-  </main>
-
-  <script src="app.js" defer></script>
-</body>
+      </footer>
+    </main>
+  </body>
 </html>
