@@ -5,7 +5,7 @@
 <p>
   <strong>Browser-first transcription studio for constrained shared hosting.</strong><br />
   Whisper inference, audio decoding, transcript editing, and export generation all run in the browser.
-  Local AI summaries use Ollama first and can fall back to a browser WASM model cache when the daemon is unavailable.
+  Local AI summaries prefer Ollama through a same-origin PHP bridge, remember the chosen model and endpoint, and can fall back to a browser WASM model cache when Ollama is unavailable.
   PHP stays small and only serves the shell, optional session protection, and optional host-side upload/download helpers.
 </p>
 
@@ -31,7 +31,7 @@
     </td>
     <td>
       <strong>Runtime</strong><br />
-      Vite, browser workers, Whisper, FFmpeg fallback, Ollama, and browser WASM local AI.
+      Vite, browser workers, Whisper, FFmpeg fallback, Ollama, and browser WASM local AI with persistence.
     </td>
   </tr>
   <tr>
@@ -80,10 +80,11 @@ flowchart LR
   C --> D[Editable transcript + subtitle exports]
   D --> E[TXT / SRT / VTT / ZIP downloads]
   D --> F[Local AI panel]
-  F --> G[Ollama daemon]
-  F --> H[Browser WASM fallback]
-  A --> I[Optional PHP upload / download / session protection]
-  I --> J[Shared hosting storage]
+  F --> G[Same-origin PHP Ollama bridge]
+  G --> H[Ollama daemon]
+  F --> I[Browser WASM fallback]
+  A --> J[Optional PHP upload / download / session protection]
+  J --> K[Shared hosting storage]
 ```
 
 ## Key Stack
@@ -168,21 +169,53 @@ package.json
 4. Review a recording in the embedded player if you captured one.
 5. Pick the model, language, task, and cleanup options.
 6. Use the Local AI runtime mode selector to choose `Auto`, `Local only`, or `Browser only`.
-7. Click `Transcribe`.
-8. Edit the transcript, generate a local AI summary if desired, and download TXT, SRT, VTT, or ZIP outputs.
+7. When Ollama is available, choose from the installed model list. The app remembers the endpoint, selected model, and last successful runtime.
+8. Click `Transcribe`.
+9. Edit the transcript, generate a local AI summary if desired, and download TXT, SRT, VTT, or ZIP outputs.
 
 > The app saves settings, the selected file, and transcript data in browser storage on supported browsers, so a refresh should restore the session instead of resetting it.
 
 ## Local AI
 
-<details>
-  <summary><strong>Runtime modes</strong></summary>
+### Runtime Modes
 
-  - `Auto` checks local Ollama first, then falls back to the browser WASM model cache if Ollama is unavailable.
-  - `Local only` stays on Ollama and never switches to the browser runtime.
-  - `Browser only` uses the cached browser model and skips Ollama entirely.
-  - The browser runtime keeps a small model catalog in `OPFS`, so the first load can take time and consume noticeable storage.
-</details>
+- `Auto` checks local Ollama first, then falls back to the browser WASM model cache if Ollama is unavailable or blocked.
+- `Local only` stays on Ollama and never switches to the browser runtime.
+- `Browser only` uses the cached browser model and skips Ollama entirely.
+
+### Ollama Bridge
+
+- Production hosted on `mytech.today` uses the same-origin PHP bridge in [`web/public/api/ollama/`](./web/public/api/ollama/) so requests do not hit the browser CORS wall.
+- The bridge forwards `tags`, `pull`, and `chat` to the local Ollama daemon and lets the app probe `/api/tags` safely from the hosted origin.
+- If you self-host without the PHP bridge, you can still point at a direct Ollama endpoint, but you must solve CORS on that origin yourself.
+
+### Model Selection
+
+- The app discovers installed models from `/api/tags`.
+- If the user has already chosen a model and it is still installed, that model wins.
+- If the last chosen model is still present, the app keeps using it.
+- Otherwise the app applies a heuristic that prefers stronger families, larger parameter counts, better quantization, and newer tags.
+- The selected Ollama model and the last successful runtime are persisted so reloads stay stable.
+
+### Browser Fallback
+
+- The browser runtime uses [`@wllama/wllama`](https://github.com/ngxson/wllama) for a browser-side GGUF path.
+- It caches models in OPFS, reports download progress, and warns when browser storage is tight.
+- This path is only used when Ollama is unreachable or when the user explicitly forces browser mode.
+
+### Storage
+
+- App settings live in `localStorage` under `py-transcribe:shared-hosting-state`.
+- Settings snapshots are versioned so future migrations can be handled cleanly.
+- Session data uses IndexedDB under `py-transcribe-session`, with a `localStorage` fallback manifest at `py-transcribe:shared-hosting-session`.
+- If storage gets cleared, the app falls back to a clean state without breaking transcription.
+
+## Migration Notes
+
+- Existing users keep their transcription workflow and session data.
+- The app now persists `localAiBaseUrl`, `localAiModelName`, `localAiLastSuccessfulRuntime`, and `localAiLastSuccessfulRuntimeAt` in the settings snapshot.
+- First load after deployment may refresh the selected Ollama model if the previously selected one is no longer installed.
+- If you previously relied on direct loopback access, keep the PHP bridge deployed on the production host so the hosted origin can reach Ollama without CORS errors.
 
 ## Limitations
 
@@ -194,6 +227,7 @@ package.json
   - Speaker labels are heuristic and not a true diarization system.
   - Translation mode changes transcript presentation, but inference still happens entirely in the browser.
   - Browser WASM local AI needs a capable desktop browser, enough RAM, and enough persistent storage to cache a GGUF model.
+  - The browser fallback can be slower than Ollama and is best treated as a resilient backup, not the primary path.
 </details>
 
 ## Troubleshooting
@@ -203,6 +237,8 @@ package.json
 
   - If the console shows `Failed to resolve module specifier "jszip"`, the host is serving source files instead of the built bundle. Upload the generated `dist/` output and make sure `index.php` or `index.html` on the host comes from that build, not from `web/`.
   - If the app opens on `index.html` instead of the PHP shell, double-check the host's `DirectoryIndex` order and keep the `.htaccess` file in place.
+  - If Ollama calls fail with CORS errors from the production origin, confirm that the same-origin bridge in [`web/public/api/ollama/`](./web/public/api/ollama/) is deployed with the app and that the host is serving the PHP shell from the same origin.
+  - If the browser fallback fails to load a model, clear site data and try the smaller browser model. The cache lives in OPFS and can be limited by browser quota.
 </details>
 
 ## Testing Checklist
@@ -210,5 +246,7 @@ package.json
 - `npm test`
 - `npm run build`
 - `npx playwright test`
+- `npx playwright test tests/e2e/14-local-ai.spec.js`
 - Confirm the app loads, accepts audio/video, records from the microphone, transcribes, and downloads exports.
+- Confirm local AI can discover Ollama models, persist the selected model, and fall back to browser WASM when Ollama is blocked or unavailable.
 - Confirm the optional PHP shell still serves the built `index.html` and `assets/` bundle.

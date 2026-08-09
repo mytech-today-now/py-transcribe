@@ -7,8 +7,18 @@ import {
 export const LOCAL_AI_RUNTIME_MODES = Object.freeze({
   auto: 'auto',
   local: 'local',
+  aiPowered: 'ai-powered',
   browser: 'browser'
 });
+
+const LOCAL_AI_RUNTIME_MODE_VALUES = new Set(Object.values(LOCAL_AI_RUNTIME_MODES));
+const BROWSER_AI_NOISE_PATTERNS = [
+  /powerPreference/i,
+  /adapter info/i,
+  /\bggml_webgpu\b.*\badapter\b/i,
+  /\bn_ctx_seq\b.*\bn_ctx_train\b/i,
+  /speculative decoding/i
+];
 
 export const BROWSER_AI_MODEL_CATALOG = Object.freeze([
   {
@@ -67,10 +77,26 @@ export const BROWSER_AI_MODEL_CATALOG = Object.freeze([
 const BROWSER_AI_DEFAULT_MODEL_ID = BROWSER_AI_MODEL_CATALOG[0]?.id || '';
 
 export function normalizeLocalAiRuntimeMode(value) {
-  const normalized = String(value || '').toLowerCase();
-  return Object.prototype.hasOwnProperty.call(LOCAL_AI_RUNTIME_MODES, normalized)
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, '-');
+
+  return LOCAL_AI_RUNTIME_MODE_VALUES.has(normalized)
     ? normalized
     : LOCAL_AI_RUNTIME_MODES.auto;
+}
+
+export function createBrowserAiLogger(baseLogger = LoggerWithoutDebug) {
+  const logger = { ...(baseLogger && typeof baseLogger === 'object' ? baseLogger : LoggerWithoutDebug) };
+
+  logger.debug = wrapLoggerMethod(logger, 'debug', true);
+  logger.log = wrapLoggerMethod(logger, 'log');
+  logger.info = wrapLoggerMethod(logger, 'info');
+  logger.warn = wrapLoggerMethod(logger, 'warn');
+  logger.error = wrapLoggerMethod(logger, 'error');
+
+  return logger;
 }
 
 export function supportsBrowserLocalAi() {
@@ -319,7 +345,7 @@ export async function createBrowserAiRuntime({
   }
 
   const runtime = new BrowserAiRuntime(Wllama, wasmUrl, normalizedModel, {
-    logger: logger || LoggerWithoutDebug,
+    logger: createBrowserAiLogger(logger || LoggerWithoutDebug),
     onStatus,
     onProgress
   });
@@ -521,6 +547,7 @@ class BrowserAiRuntime {
       await this.dispose();
     }
 
+    const restoreConsoleFilter = installBrowserAiConsoleNoiseFilter();
     if (!this.instance || forceRefresh) {
       this.instance = new this.WllamaCtor({ default: this.wasmUrl }, {
         logger: this.logger,
@@ -551,18 +578,22 @@ class BrowserAiRuntime {
       });
     };
 
-    await this.instance.loadModelFromHF({
-      repo: model.repo,
-      file: model.file
-    }, {
-      useCache: true,
-      signal,
-      progressCallback,
-      n_ctx: model.nCtx || 8192,
-      n_batch: 128,
-      n_gpu_layers: 0,
-      n_threads: Math.max(1, Math.floor(((typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4) / 2))
-    });
+    try {
+      await this.instance.loadModelFromHF({
+        repo: model.repo,
+        file: model.file
+      }, {
+        useCache: true,
+        signal,
+        progressCallback,
+        n_ctx: model.nCtx || 8192,
+        n_batch: 128,
+        n_gpu_layers: 0,
+        n_threads: Math.max(1, Math.floor(((typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4) / 2))
+      });
+    } finally {
+      restoreConsoleFilter();
+    }
 
     this.loadedModelId = model.id;
     this.loadedModel = model;
@@ -596,6 +627,91 @@ function normalizeChatHistory(history) {
 
 function normalizeResponseText(value) {
   return String(value || '').replace(/\r\n/g, '\n').trim();
+}
+
+function wrapLoggerMethod(logger, methodName, filterDebug = false) {
+  const method = typeof logger?.[methodName] === 'function'
+    ? logger[methodName].bind(logger)
+    : null;
+
+  if (!method) {
+    return () => {};
+  }
+
+  return (...args) => {
+    if (filterDebug || shouldSuppressBrowserAiNoise(args)) {
+      return;
+    }
+
+    method(...args);
+  };
+}
+
+function shouldSuppressBrowserAiNoise(args) {
+  const message = flattenLoggerArgs(args);
+  return Boolean(message) && BROWSER_AI_NOISE_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+function flattenLoggerArgs(args) {
+  return args
+    .map((value) => stringifyLoggerValue(value))
+    .join(' ')
+    .trim();
+}
+
+function stringifyLoggerValue(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (value instanceof Error) {
+    return value.stack || value.message || '';
+  }
+
+  if (typeof value === 'number' || typeof value === 'bigint' || typeof value === 'boolean') {
+    return String(value);
+  }
+
+  if (value === null || value === undefined) {
+    return '';
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function installBrowserAiConsoleNoiseFilter() {
+  if (typeof console === 'undefined') {
+    return () => {};
+  }
+
+  const methodNames = ['debug', 'log', 'info', 'warn'];
+  const originals = new Map();
+
+  for (const methodName of methodNames) {
+    const original = console[methodName];
+    if (typeof original !== 'function') {
+      continue;
+    }
+
+    originals.set(methodName, original);
+    console[methodName] = (...args) => {
+      if (shouldSuppressBrowserAiNoise(args)) {
+        return;
+      }
+
+      return original.apply(console, args);
+    };
+  }
+
+  return () => {
+    for (const [methodName, original] of originals.entries()) {
+      console[methodName] = original;
+    }
+  };
 }
 
 function abortError() {

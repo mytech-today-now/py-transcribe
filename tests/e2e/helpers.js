@@ -94,7 +94,10 @@ export async function installLocalAiRoutes(page, {
   pullDelayMs = 0,
   chatDelayMs = 0,
   tagsDelayMs = 0,
-  proxyTagsStatus = 200
+  proxyTagsStatus = 200,
+  proxyPullStatus = 200,
+  proxyChatStatus = 200,
+  directCors = false
 } = {}) {
   const requests = {
     tags: [],
@@ -119,10 +122,26 @@ export async function installLocalAiRoutes(page, {
     'content-type': 'application/x-ndjson; charset=utf-8'
   };
 
-  const fulfillPreflight = async (route) => {
+  const directHeaders = directCors
+    ? corsHeaders
+    : {
+        'cache-control': 'no-store'
+      };
+
+  const directJsonHeaders = {
+    ...directHeaders,
+    'content-type': 'application/json; charset=utf-8'
+  };
+
+  const directNdjsonHeaders = {
+    ...directHeaders,
+    'content-type': 'application/x-ndjson; charset=utf-8'
+  };
+
+  const fulfillPreflight = async (route, headers = corsHeaders) => {
     await route.fulfill({
       status: 204,
-      headers: corsHeaders,
+      headers,
       body: ''
     });
   };
@@ -152,7 +171,7 @@ export async function installLocalAiRoutes(page, {
     });
 
     if (request.method() === 'OPTIONS') {
-      await fulfillPreflight(route);
+      await fulfillPreflight(route, directCors ? corsHeaders : directHeaders);
       return;
     }
 
@@ -160,7 +179,7 @@ export async function installLocalAiRoutes(page, {
       await new Promise((resolve) => setTimeout(resolve, tagsDelayMs));
     }
 
-    await fulfillJson(route, { models });
+    await fulfillJson(route, { models }, directJsonHeaders);
   });
 
   await page.route(/\/api\/ollama\/tags\.php(?:\?.*)?$/i, async (route, request) => {
@@ -199,11 +218,55 @@ export async function installLocalAiRoutes(page, {
     requests.pull.push({
       method: request.method(),
       url: request.url(),
+      kind: 'direct',
+      postData: payload
+    });
+
+    if (request.method() === 'OPTIONS') {
+      await fulfillPreflight(route, directCors ? corsHeaders : directHeaders);
+      return;
+    }
+
+    if (pullDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, pullDelayMs));
+    }
+
+    await fulfillNdjson(route, pullLines, directNdjsonHeaders);
+
+    const pulledModelName = String(payload?.model || '').trim();
+    if (pulledModelName && !models.some((model) => String(model?.name || '').toLowerCase() === pulledModelName.toLowerCase())) {
+      models.push({
+        name: pulledModelName,
+        details: {
+          family: /kimi/i.test(pulledModelName) ? 'Kimi' : ''
+        }
+      });
+    }
+  });
+
+  await page.route(/\/api\/ollama\/pull\.php(?:\?.*)?$/i, async (route, request) => {
+    const payload = request.postDataJSON?.() ?? null;
+    requests.pull.push({
+      method: request.method(),
+      url: request.url(),
+      kind: 'proxy',
       postData: payload
     });
 
     if (request.method() === 'OPTIONS') {
       await fulfillPreflight(route);
+      return;
+    }
+
+    if (proxyPullStatus !== 200) {
+      await route.fulfill({
+        status: proxyPullStatus,
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          ok: false,
+          error: 'Ollama proxy unavailable.'
+        })
+      });
       return;
     }
 
@@ -228,11 +291,44 @@ export async function installLocalAiRoutes(page, {
     requests.chat.push({
       method: request.method(),
       url: request.url(),
+      kind: 'direct',
+      postData: request.postDataJSON?.() ?? null
+    });
+
+    if (request.method() === 'OPTIONS') {
+      await fulfillPreflight(route, directCors ? corsHeaders : directHeaders);
+      return;
+    }
+
+    if (chatDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, chatDelayMs));
+    }
+
+    await fulfillNdjson(route, chatLines, directNdjsonHeaders);
+  });
+
+  await page.route(/\/api\/ollama\/chat\.php(?:\?.*)?$/i, async (route, request) => {
+    requests.chat.push({
+      method: request.method(),
+      url: request.url(),
+      kind: 'proxy',
       postData: request.postDataJSON?.() ?? null
     });
 
     if (request.method() === 'OPTIONS') {
       await fulfillPreflight(route);
+      return;
+    }
+
+    if (proxyChatStatus !== 200) {
+      await route.fulfill({
+        status: proxyChatStatus,
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          ok: false,
+          error: 'Ollama proxy unavailable.'
+        })
+      });
       return;
     }
 

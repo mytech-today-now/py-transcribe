@@ -1,5 +1,7 @@
 export const OLLAMA_DEFAULT_BASE_URL = 'http://127.0.0.1:11434';
 export const OLLAMA_LOCALHOST_BASE_URL = 'http://localhost:11434';
+export const OLLAMA_IPV6_LOOPBACK_BASE_URL = 'http://[::1]:11434';
+export const OLLAMA_PROXY_BASE_URL = 'api/ollama';
 const OLLAMA_DOWNLOAD_URL = 'https://ollama.com/download';
 const LOCAL_AI_MAX_TRANSCRIPT_CHARS = 160000;
 const LOCAL_AI_MAX_CHAT_TRANSCRIPT_CHARS = 120000;
@@ -70,28 +72,20 @@ export function normalizeOllamaBaseUrl(baseUrl) {
   return String(baseUrl || '').trim().replace(/\/+$/, '');
 }
 
-function shouldIncludeSameOriginFallbacks() {
-  if (typeof location === 'undefined') {
-    return true;
-  }
-
-  const protocol = String(location.protocol || '').toLowerCase();
-  if (protocol === 'file:') {
-    return true;
-  }
-
-  const hostname = String(location.hostname || '').toLowerCase();
-  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
-}
-
 export function resolveOllamaBaseUrlCandidates(baseUrl = OLLAMA_DEFAULT_BASE_URL) {
   const normalizedBaseUrl = normalizeOllamaBaseUrl(baseUrl);
   const candidates = [];
-
-  candidates.push(OLLAMA_DEFAULT_BASE_URL, OLLAMA_LOCALHOST_BASE_URL);
-
   const isAbsoluteBaseUrl = /^[a-z][a-z\d+.-]*:\/\//i.test(normalizedBaseUrl);
-  if (normalizedBaseUrl && (isAbsoluteBaseUrl || shouldIncludeSameOriginFallbacks())) {
+
+  if (normalizedBaseUrl && isAbsoluteBaseUrl) {
+    candidates.push(normalizedBaseUrl);
+  }
+
+  candidates.push(OLLAMA_DEFAULT_BASE_URL);
+  candidates.push(OLLAMA_LOCALHOST_BASE_URL);
+  candidates.push(OLLAMA_IPV6_LOOPBACK_BASE_URL);
+
+  if (normalizedBaseUrl && !isAbsoluteBaseUrl) {
     candidates.push(normalizedBaseUrl);
   }
 
@@ -175,6 +169,65 @@ export function resolveBestKimiModel(models, { cachedModelName = '' } = {}) {
         model: candidate,
         modelName,
         score
+      };
+    }
+  }
+
+  return best;
+}
+
+export function resolvePreferredOllamaModel(models, {
+  selectedModelName = '',
+  cachedModelName = ''
+} = {}) {
+  if (!Array.isArray(models) || models.length === 0) {
+    return null;
+  }
+
+  const normalizedSelected = String(selectedModelName || '').trim().toLowerCase();
+  const normalizedCached = String(cachedModelName || '').trim().toLowerCase();
+
+  if (normalizedSelected) {
+    const selected = models.find((model) => normalizeLocalAiModelName(model).toLowerCase() === normalizedSelected);
+    if (selected) {
+      return {
+        model: selected,
+        modelName: normalizeLocalAiModelName(selected),
+        score: Number.POSITIVE_INFINITY,
+        reason: 'selected'
+      };
+    }
+  }
+
+  if (normalizedCached) {
+    const cached = models.find((model) => normalizeLocalAiModelName(model).toLowerCase() === normalizedCached);
+    if (cached) {
+      return {
+        model: cached,
+        modelName: normalizeLocalAiModelName(cached),
+        score: Number.POSITIVE_INFINITY - 1,
+        reason: 'cached'
+      };
+    }
+  }
+
+  let best = null;
+  for (const candidate of models) {
+    const modelName = normalizeLocalAiModelName(candidate);
+    const score = scoreOllamaModel(candidate, {
+      selectedModelName: normalizedSelected,
+      cachedModelName: normalizedCached
+    });
+    if (!Number.isFinite(score)) {
+      continue;
+    }
+
+    if (!best || score > best.score) {
+      best = {
+        model: candidate,
+        modelName,
+        score,
+        reason: 'heuristic'
       };
     }
   }
@@ -325,7 +378,7 @@ export async function fetchOllamaModels({
 }
 
 export async function fetchOllamaModelsFromCandidates({
-  baseUrls = [OLLAMA_DEFAULT_BASE_URL],
+  baseUrls = [OLLAMA_DEFAULT_BASE_URL, OLLAMA_LOCALHOST_BASE_URL, OLLAMA_IPV6_LOOPBACK_BASE_URL, OLLAMA_PROXY_BASE_URL],
   signal,
   fetchImpl = fetch
 } = {}) {
@@ -618,7 +671,7 @@ export function describeLocalAiError(error, { phase = 'connect', baseUrl = OLLAM
   }
 
   if (lowered.includes('cors') || lowered.includes('origin')) {
-    return `The browser blocked access to Ollama at ${baseUrl}. If Ollama is already running, allow this app in OLLAMA_ORIGINS or open the local PHP build so its Ollama bridge can reach the daemon, then click Retry.`;
+    return `The browser blocked access to Ollama at ${baseUrl}. If Ollama is already running, allow this app in OLLAMA_ORIGINS or keep the same-origin PHP Ollama bridge enabled, then click Retry.`;
   }
 
   if (phase === 'summary') {
@@ -778,6 +831,113 @@ function scoreKimiModel(model, { cachedModelName = '' } = {}) {
   if (Number.isFinite(modifiedAt)) {
     const ageDays = Math.max(0, (Date.now() - modifiedAt) / (1000 * 60 * 60 * 24));
     score += Math.max(0, 30 - Math.min(30, ageDays));
+  }
+
+  return score;
+}
+
+function scoreOllamaModel(model, {
+  selectedModelName = '',
+  cachedModelName = ''
+} = {}) {
+  const name = normalizeLocalAiModelName(model).toLowerCase();
+  if (!name) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  let score = 0;
+
+  if (name.includes(selectedModelName) && selectedModelName) {
+    score += 1_000;
+  }
+
+  if (name.includes(cachedModelName) && cachedModelName) {
+    score += 450;
+  }
+
+  const familyTokens = new Set([
+    String(model?.details?.family || '').toLowerCase(),
+    ...(Array.isArray(model?.details?.families) ? model.details.families.map((family) => String(family || '').toLowerCase()) : [])
+  ].filter(Boolean));
+
+  const familyWeights = [
+    ['kimi', 260],
+    ['qwen', 240],
+    ['llama', 220],
+    ['gemma', 210],
+    ['mistral', 190],
+    ['deepseek', 185],
+    ['phi', 175],
+    ['mixtral', 160],
+    ['nous', 150],
+    ['openhermes', 140],
+    ['yi', 130],
+    ['granite', 110],
+    ['codellama', 100],
+    ['orca', 95]
+  ];
+
+  for (const [family, weight] of familyWeights) {
+    if (familyTokens.has(family) || name.includes(family)) {
+      score += weight;
+      break;
+    }
+  }
+
+  if (/\b(instruct|chat|assistant|thinking|reasoning)\b/i.test(name)) {
+    score += 40;
+  }
+
+  if (/\bbase\b/i.test(name)) {
+    score -= 25;
+  }
+
+  if (isCloudModelName(name)) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  const parameterSize = parseParameterSize(model?.details?.parameter_size);
+  if (parameterSize) {
+    score += Math.min(320, Math.log10(parameterSize + 1) * 55);
+  }
+
+  const byteSize = toPositiveNumber(model?.size);
+  if (byteSize) {
+    score += Math.min(160, Math.log10(byteSize + 1) * 14);
+  }
+
+  const quantization = String(model?.details?.quantization_level || '').trim().toUpperCase();
+  const quantizationWeights = [
+    ['FP16', 115],
+    ['F16', 115],
+    ['Q8_0', 100],
+    ['Q6_K', 88],
+    ['Q5_K_M', 80],
+    ['Q5_K_S', 76],
+    ['Q4_K_M', 68],
+    ['Q4_K_S', 64],
+    ['Q4_0', 58],
+    ['Q3_K_M', 42],
+    ['Q3_K_S', 35],
+    ['Q3_0', 30],
+    ['Q2_K', 12]
+  ];
+
+  for (const [pattern, weight] of quantizationWeights) {
+    if (quantization === pattern || name.includes(pattern.toLowerCase())) {
+      score += weight;
+      break;
+    }
+  }
+
+  const modifiedAt = Date.parse(String(model?.modified_at || ''));
+  if (Number.isFinite(modifiedAt)) {
+    const ageDays = Math.max(0, (Date.now() - modifiedAt) / (1000 * 60 * 60 * 24));
+    score += Math.max(0, 45 - Math.min(45, ageDays / 10));
+  }
+
+  if (/kimi/.test(name)) {
+    score += 20;
   }
 
   return score;

@@ -10,6 +10,7 @@ import {
   normalizeLocalAiDetailLevel,
   prepareTranscriptForSummary,
   resolveBestKimiModel,
+  resolvePreferredOllamaModel,
   resolvePreferredKimiPullCandidate,
   resolveOllamaBaseUrlCandidates,
   shouldAttemptLocalAiDetection
@@ -104,23 +105,22 @@ describe('local AI helpers', () => {
     expect(requests).toEqual(['api/ollama/tags.php']);
   });
 
-  it('prefers loopback Ollama endpoints before the configured proxy bridge', () => {
+  it('prefers the configured proxy bridge before loopback Ollama endpoints', () => {
     expect(resolveOllamaBaseUrlCandidates('api/ollama')).toEqual([
+      'api/ollama',
       'http://127.0.0.1:11434',
       'http://localhost:11434',
-      'api/ollama'
+      'http://[::1]:11434'
     ]);
   });
 
-  it('keeps remote origins on the loopback Ollama candidates only', () => {
-    vi.stubGlobal('location', {
-      protocol: 'https:',
-      hostname: 'mytech.today'
-    });
-
-    expect(resolveOllamaBaseUrlCandidates('api/ollama')).toEqual([
+  it('keeps custom absolute Ollama endpoints alongside the proxy bridge', () => {
+    expect(resolveOllamaBaseUrlCandidates('http://example.test:11434')).toEqual([
+      'api/ollama',
+      'http://example.test:11434',
       'http://127.0.0.1:11434',
-      'http://localhost:11434'
+      'http://localhost:11434',
+      'http://[::1]:11434'
     ]);
   });
 
@@ -131,6 +131,14 @@ describe('local AI helpers', () => {
       baseUrls: resolveOllamaBaseUrlCandidates('api/ollama'),
       fetchImpl: async (url) => {
         requests.push(url);
+
+        if (String(url).startsWith('api/ollama')) {
+          return {
+            ok: false,
+            status: 500,
+            text: async () => 'bridge error'
+          };
+        }
 
         if (String(url).startsWith('http://127.0.0.1:11434')) {
           throw new Error('Failed to fetch');
@@ -149,13 +157,63 @@ describe('local AI helpers', () => {
       }
     });
 
-    expect(result.baseUrl).toBe('api/ollama');
+    expect(result.baseUrl).toBe('http://[::1]:11434');
     expect(result.models).toEqual([{ name: 'demo-model' }]);
     expect(requests).toEqual([
+      'api/ollama/tags.php',
       'http://127.0.0.1:11434/api/tags',
       'http://localhost:11434/api/tags',
-      'api/ollama/tags.php'
+      'http://[::1]:11434/api/tags'
     ]);
+  });
+
+  it('prefers the selected Ollama model, then the cached model, then a heuristic fallback', () => {
+    const models = [
+      {
+        name: 'acme/kimi-small',
+        details: {
+          family: 'Kimi',
+          parameter_size: '2B',
+          quantization_level: 'Q4_K_M'
+        },
+        size: 1_000_000_000,
+        modified_at: '2024-01-01T00:00:00Z'
+      },
+      {
+        name: 'acme/kimi-large',
+        details: {
+          family: 'Kimi',
+          parameter_size: '7B',
+          quantization_level: 'Q5_K_M'
+        },
+        size: 5_000_000_000,
+        modified_at: '2025-01-01T00:00:00Z'
+      }
+    ];
+
+    expect(resolvePreferredOllamaModel(models, {
+      selectedModelName: 'acme/kimi-small',
+      cachedModelName: 'acme/kimi-large'
+    })).toMatchObject({
+      modelName: 'acme/kimi-small',
+      reason: 'selected'
+    });
+
+    expect(resolvePreferredOllamaModel(models, {
+      selectedModelName: 'missing-model',
+      cachedModelName: 'acme/kimi-large'
+    })).toMatchObject({
+      modelName: 'acme/kimi-large',
+      reason: 'cached'
+    });
+
+    expect(resolvePreferredOllamaModel(models, {
+      selectedModelName: 'missing-model',
+      cachedModelName: 'missing-model'
+    })).toMatchObject({
+      modelName: 'acme/kimi-large',
+      reason: 'heuristic'
+    });
   });
 
   it('normalizes unexpected detail levels back to standard', () => {

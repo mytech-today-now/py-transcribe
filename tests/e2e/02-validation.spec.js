@@ -9,7 +9,7 @@ import {
   withSpoofedSize
 } from './helpers.js';
 
-const oversizedBytes = 1_073_741_825;
+const oversizedBytes = 2_684_354_561;
 
 test.describe('File validation', () => {
   test.beforeEach(async ({ page }) => {

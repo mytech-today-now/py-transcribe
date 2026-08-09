@@ -304,7 +304,7 @@ function app_build_config(array $extra = []): array
         'storageEnabled' => true,
         'localAiAutoDownload' => true,
         'uploadLimitBytes' => app_max_upload_bytes(),
-        'clientLimitBytes' => 128 * 1024 * 1024,
+        'clientLimitBytes' => (int) (2.5 * 1024 * 1024 * 1024),
     ], $extra);
 }
 

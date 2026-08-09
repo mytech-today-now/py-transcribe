@@ -26,15 +26,17 @@ import {
 } from './lib/whisper.js';
 import {
   OLLAMA_DEFAULT_BASE_URL,
+  OLLAMA_PROXY_BASE_URL,
   fetchOllamaModels,
   fetchOllamaModelsFromCandidates,
   chatWithOllama,
   describeLocalAiError,
   LOCAL_AI_PULL_CANDIDATES,
   pullOllamaModelWithProgress,
-  resolveBestKimiModel,
   resolvePreferredKimiPullCandidate,
+  resolvePreferredOllamaModel,
   resolveOllamaBaseUrlCandidates,
+  normalizeOllamaBaseUrl,
   shouldAttemptLocalAiDetection,
   summarizeWithOllama,
   LOCAL_AI_DETAIL_LEVELS,
@@ -104,10 +106,11 @@ const LANGUAGE_OPTIONS = [
 
 const STORAGE_KEY = 'py-transcribe:shared-hosting-state';
 const SESSION_FALLBACK_KEY = 'py-transcribe:shared-hosting-session';
-const DEFAULT_CLIENT_LIMIT = 128 * 1024 * 1024;
+const SETTINGS_STORAGE_VERSION = 2;
+const DEFAULT_CLIENT_LIMIT = 2.5 * 1024 * 1024 * 1024;
 const DEFAULT_SERVER_LIMIT = 16 * 1024 * 1024;
 const LOCAL_AI_CHAT_HISTORY_LIMIT = 16;
-const LOCAL_AI_PROXY_BASE_URL = 'api/ollama';
+const LOCAL_AI_PROXY_BASE_URL = OLLAMA_PROXY_BASE_URL;
 const OLLAMA_DOWNLOAD_URL = 'https://ollama.com/download';
 const LOCAL_AI_STATUS_MESSAGES = {
   connecting: 'Connecting to local Ollama...',
@@ -175,8 +178,11 @@ const state = {
     message: '',
     detail: '',
     baseUrl: '',
+    lastSuccessfulRuntime: '',
+    lastSuccessfulRuntimeAt: '',
     modelName: '',
     modelId: '',
+    modelSelectionReason: '',
     progress: null,
     progressText: '',
     checking: false,
@@ -786,12 +792,20 @@ function formatLocalAiModelLabel(model) {
   const details = [];
   const family = String(model?.details?.family || '').trim();
   const parameterSize = String(model?.details?.parameter_size || '').trim();
+  const quantization = String(model?.details?.quantization_level || '').trim();
+  const sizeBytes = Number(model?.size || 0);
 
   if (family) {
     details.push(family);
   }
   if (parameterSize) {
     details.push(parameterSize);
+  }
+  if (quantization) {
+    details.push(quantization);
+  }
+  if (sizeBytes > 0) {
+    details.push(formatBytes(sizeBytes));
   }
 
   return details.length ? `${name} · ${details.join(' · ')}` : name;
@@ -990,9 +1004,12 @@ function renderLocalAiModelSelect() {
         ? `Selected ${selectedModelName} is installed.`
         : `${selectedModelName} is not installed yet.`)
       : 'Choose an installed model or download the latest Kimi variant.';
+    const heuristicNote = state.localAi.modelSelectionReason === 'heuristic' && selectedModelName
+      ? ' Auto-selected via the ranking heuristic.'
+      : '';
     refs.aiModelMeta.textContent = installedCount
-      ? `${selectedLabel} ${installedCount.toLocaleString()} installed model${installedCount === 1 ? '' : 's'} available.`
-      : selectedLabel;
+      ? `${selectedLabel}${heuristicNote} ${installedCount.toLocaleString()} installed model${installedCount === 1 ? '' : 's'} available.`
+      : `${selectedLabel}${heuristicNote}`;
   }
 }
 
@@ -1085,6 +1102,7 @@ function updateLocalAiModelSelection(modelName, { persist = true } = {}) {
       state.settings.localAiBrowserModelSizeLabel = nextModel.sizeLabel;
       state.settings.localAiBrowserModelApproxBytes = nextModel.approxSizeBytes;
       state.settings.localAiBrowserModelNote = nextModel.note;
+      state.localAi.modelSelectionReason = 'selected';
     }
 
     state.localAi.available = Boolean(state.localAi.browser.ready);
@@ -1113,6 +1131,7 @@ function updateLocalAiModelSelection(modelName, { persist = true } = {}) {
       state.localAi.modelId = nextModelName;
       state.settings.localAiModelName = nextModelName;
       state.localAi.cachedModelName = nextModelName;
+      state.localAi.modelSelectionReason = 'selected';
     }
 
     const installed = isInstalledLocalAiModel(state.localAi.modelName);
@@ -1186,14 +1205,24 @@ function renderLocalAiState() {
   renderLocalAiModelSelect();
   if (refs.aiRuntimeMeta) {
     const runtimeMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto');
-    refs.aiRuntimeMeta.textContent = runtimeMode === LOCAL_AI_RUNTIME_MODES.browser
+    const runtimeText = runtimeMode === LOCAL_AI_RUNTIME_MODES.browser
       ? 'Browser-only mode uses the cached Kimi GGUF model in OPFS.'
       : runtimeMode === LOCAL_AI_RUNTIME_MODES.local
         ? 'Local-only mode prefers Ollama and does not switch to the browser model cache.'
         : 'Auto mode checks local Ollama first, then falls back to the browser WASM model if needed.';
-    if (browserStorageWarning) {
-      refs.aiRuntimeMeta.textContent = `${refs.aiRuntimeMeta.textContent} ${browserStorageWarning}`;
-    }
+    const endpointText = describeLocalAiEndpoint(state.localAi.baseUrl || state.settings.localAiBaseUrl || state.config.localAiBaseUrl || '');
+    const lastRuntimeText = state.localAi.lastSuccessfulRuntime === 'browser'
+      ? 'Last successful runtime: Browser WASM.'
+      : state.localAi.lastSuccessfulRuntime === 'ollama'
+        ? 'Last successful runtime: Local Ollama.'
+        : '';
+    const endpointSummary = endpointText
+      ? `Ollama endpoint: ${endpointText}.`
+      : '';
+    const extras = [endpointSummary, lastRuntimeText, browserStorageWarning].filter(Boolean).join(' ');
+    refs.aiRuntimeMeta.textContent = extras
+      ? `${runtimeText} ${extras}`
+      : runtimeText;
   }
   refs.checkAiButton.textContent = runtimeKind === 'browser'
     ? browserWorking
@@ -1475,14 +1504,13 @@ function setLocalAiUnavailable(detail, { keepModel = false } = {}) {
   state.localAi.progressText = '';
   state.localAi.summaryError = '';
   state.localAi.activeController = null;
-  state.localAi.baseUrl = '';
   if (!keepModel) {
     state.localAi.modelName = state.settings.localAiModelName || state.localAi.cachedModelName || '';
   }
   renderAll();
 }
 
-function setLocalAiReady(model, { source = 'installed', checkedAt = new Date().toISOString() } = {}) {
+function setLocalAiReady(model, { source = 'installed', reason = '', checkedAt = new Date().toISOString() } = {}) {
   const modelName = normalizeLocalAiModelName(model);
   state.localAi.available = true;
   state.localAi.runtimeKind = 'ollama';
@@ -1492,12 +1520,13 @@ function setLocalAiReady(model, { source = 'installed', checkedAt = new Date().t
   state.localAi.status = 'ready';
   state.localAi.message = LOCAL_AI_STATUS_MESSAGES.ready;
   state.localAi.detail = source === 'pulled'
-    ? `${modelName} was downloaded and is ready for summaries and chat.`
-    : `${modelName} is ready for summaries and chat.`;
+    ? `Using local model: ${modelName}. It was downloaded and is ready for summaries and chat.`
+    : `Using local model: ${modelName}.`;
   state.localAi.progress = null;
   state.localAi.progressText = '';
   state.localAi.summaryError = '';
   state.localAi.activeController = null;
+  state.localAi.modelSelectionReason = reason || state.localAi.modelSelectionReason || 'selected';
   state.localAi.browser.loading = false;
   state.localAi.browser.ready = false;
   state.localAi.browser.status = 'idle';
@@ -1512,8 +1541,13 @@ function setLocalAiReady(model, { source = 'installed', checkedAt = new Date().t
   state.localAi.modelName = modelName;
   state.localAi.cachedModelName = modelName;
   state.localAi.lastSuccessfulCheckAt = checkedAt;
+  state.localAi.lastSuccessfulRuntime = 'ollama';
+  state.localAi.lastSuccessfulRuntimeAt = checkedAt;
   state.settings.localAiModelName = modelName;
   state.settings.localAiLastSuccessfulCheckAt = checkedAt;
+  state.settings.localAiLastSuccessfulRuntime = 'ollama';
+  state.settings.localAiLastSuccessfulRuntimeAt = checkedAt;
+  state.settings.localAiBaseUrl = normalizeOllamaBaseUrl(state.localAi.baseUrl || state.settings.localAiBaseUrl || state.config.localAiBaseUrl || '');
   persistSettings();
   renderAll();
 }
@@ -1681,6 +1715,10 @@ function setBrowserLocalAiReady(model, { cached = true, loadedAt = new Date().to
   state.settings.localAiBrowserModelNote = selectedModel.note;
   state.settings.localAiModelName = selectedModel.label;
   state.settings.localAiLastSuccessfulCheckAt = loadedAt;
+  state.localAi.lastSuccessfulRuntime = 'browser';
+  state.localAi.lastSuccessfulRuntimeAt = loadedAt;
+  state.settings.localAiLastSuccessfulRuntime = 'browser';
+  state.settings.localAiLastSuccessfulRuntimeAt = loadedAt;
   persistSettings();
   renderAll();
 }
@@ -1773,34 +1811,26 @@ async function initializeLocalAi({ forceRefresh = false } = {}) {
 
   try {
     const { baseUrl, models } = await fetchOllamaModelsFromCandidates({
-      baseUrls: resolveOllamaBaseUrlCandidates(state.config.localAiBaseUrl),
+      baseUrls: resolveOllamaBaseUrlCandidates(resolveLocalAiBaseUrl()),
       signal: controller.signal
     });
     if (controller.signal.aborted || requestId !== state.localAi.checkRequestId) {
       return;
     }
 
-    state.localAi.baseUrl = baseUrl;
+    state.localAi.baseUrl = normalizeOllamaBaseUrl(baseUrl);
     state.localAi.installedModels = Array.isArray(models) ? models : [];
 
     const selectedModelName = normalizeLocalAiText(state.localAi.modelName || state.settings.localAiModelName);
-    const installedModel = selectedModelName
-      ? state.localAi.installedModels.find((model) => normalizeLocalAiModelName(model).toLowerCase() === selectedModelName.toLowerCase())
-      : null;
-    const bestInstalled = resolveBestKimiModel(state.localAi.installedModels, {
-      cachedModelName: selectedModelName || state.localAi.cachedModelName || state.settings.localAiModelName
+    const preferredModel = resolvePreferredOllamaModel(state.localAi.installedModels, {
+      selectedModelName,
+      cachedModelName: state.localAi.cachedModelName || state.settings.localAiModelName
     });
 
-    if (installedModel) {
-      setLocalAiReady(installedModel, {
-        source: 'installed'
-      });
-      return;
-    }
-
-    if (!selectedModelName && bestInstalled) {
-      setLocalAiReady(bestInstalled.model || bestInstalled, {
-        source: 'installed'
+    if (preferredModel?.model) {
+      setLocalAiReady(preferredModel.model, {
+        source: preferredModel.reason === 'heuristic' ? 'installed' : preferredModel.reason,
+        reason: preferredModel.reason,
       });
       return;
     }
@@ -1836,9 +1866,11 @@ async function initializeLocalAi({ forceRefresh = false } = {}) {
           cachedModelName: state.localAi.cachedModelName || state.settings.localAiModelName
         });
         state.localAi.modelName = candidate?.name || state.localAi.cachedModelName || state.settings.localAiModelName || '';
+        state.localAi.modelSelectionReason = 'heuristic';
         state.settings.localAiModelName = state.localAi.modelName;
       } else {
         state.localAi.modelName = selectedModelName;
+        state.localAi.modelSelectionReason = 'selected';
         state.settings.localAiModelName = selectedModelName;
       }
       renderAll();
@@ -1858,6 +1890,7 @@ async function initializeLocalAi({ forceRefresh = false } = {}) {
     }
 
     state.localAi.modelName = candidate.name;
+    state.localAi.modelSelectionReason = 'heuristic';
     state.settings.localAiModelName = candidate.name;
     state.localAi.cachedModelName = candidate.name;
     renderAll();
@@ -1891,11 +1924,13 @@ async function initializeLocalAi({ forceRefresh = false } = {}) {
     }
 
     state.localAi.installedModels = Array.isArray(refreshedModels) ? refreshedModels : state.localAi.installedModels;
-    const resolved = resolveBestKimiModel(refreshedModels, {
+    const resolved = resolvePreferredOllamaModel(refreshedModels, {
+      selectedModelName: candidate.name,
       cachedModelName: candidate.name
     });
     setLocalAiReady(resolved?.model || resolved || { name: candidate.name }, {
-      source: 'pulled'
+      source: 'pulled',
+      reason: resolved?.reason || 'heuristic'
     });
   } catch (error) {
     if (controller.signal.aborted || requestId !== state.localAi.checkRequestId) {
@@ -2982,6 +3017,7 @@ function preferredDevice() {
 
 function buildSettingsSnapshot() {
   return {
+    version: SETTINGS_STORAGE_VERSION,
     modelKey: refs.modelSelect.value,
     task: refs.taskSelect.value,
     language: refs.languageSelect.value,
@@ -2999,8 +3035,11 @@ function buildSettingsSnapshot() {
         ? 'detailed'
         : 'standard',
     localAiRuntimeMode: normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto'),
+    localAiBaseUrl: normalizeOllamaBaseUrl(state.localAi.baseUrl || state.settings.localAiBaseUrl || state.config.localAiBaseUrl || ''),
     localAiModelName: state.localAi.modelName || '',
     localAiLastSuccessfulCheckAt: state.localAi.lastSuccessfulCheckAt || '',
+    localAiLastSuccessfulRuntime: state.localAi.lastSuccessfulRuntime || state.settings.localAiLastSuccessfulRuntime || '',
+    localAiLastSuccessfulRuntimeAt: state.localAi.lastSuccessfulRuntimeAt || state.settings.localAiLastSuccessfulRuntimeAt || '',
     localAiBrowserModelId: state.settings.localAiBrowserModelId || state.localAi.browser.modelId || '',
     localAiBrowserModelName: state.settings.localAiBrowserModelName || state.localAi.browser.modelName || '',
     localAiBrowserModelRepo: state.settings.localAiBrowserModelRepo || state.localAi.browser.modelRepo || '',
@@ -3095,6 +3134,7 @@ function buildSessionFallbackManifest(snapshot = buildPersistedSessionSnapshot()
 function loadSettings() {
   const injected = globalThis.__TRANSCRIBE_CONFIG__ ?? {};
   const defaults = {
+    version: SETTINGS_STORAGE_VERSION,
     modelKey: 'tiny-en',
     task: 'transcribe',
     language: 'auto',
@@ -3105,8 +3145,11 @@ function loadSettings() {
     serverCopy: false,
     summaryDetail: 'standard',
     localAiRuntimeMode: normalizeLocalAiRuntimeMode(injected.localAiRuntimeMode || LOCAL_AI_RUNTIME_MODES.auto),
+    localAiBaseUrl: normalizeOllamaBaseUrl(injected.localAiBaseUrl || LOCAL_AI_PROXY_BASE_URL),
     localAiModelName: '',
     localAiLastSuccessfulCheckAt: '',
+    localAiLastSuccessfulRuntime: '',
+    localAiLastSuccessfulRuntimeAt: '',
     localAiBrowserModelId: '',
     localAiBrowserModelName: '',
     localAiBrowserModelRepo: '',
@@ -3141,10 +3184,14 @@ function loadSettings() {
     return {
       ...defaults,
       ...parsed,
+      version: Number(parsed?.version || SETTINGS_STORAGE_VERSION) || SETTINGS_STORAGE_VERSION,
       summaryDetail: normalizeLocalAiDetailLevel(parsed?.summaryDetail || defaults.summaryDetail),
       localAiRuntimeMode: normalizeLocalAiRuntimeMode(parsed?.localAiRuntimeMode || defaults.localAiRuntimeMode),
+      localAiBaseUrl: normalizeOllamaBaseUrl(parsed?.localAiBaseUrl || defaults.localAiBaseUrl),
       localAiModelName: String(parsed?.localAiModelName || ''),
       localAiLastSuccessfulCheckAt: String(parsed?.localAiLastSuccessfulCheckAt || ''),
+      localAiLastSuccessfulRuntime: String(parsed?.localAiLastSuccessfulRuntime || ''),
+      localAiLastSuccessfulRuntimeAt: String(parsed?.localAiLastSuccessfulRuntimeAt || ''),
       localAiBrowserModelId: String(parsed?.localAiBrowserModelId || ''),
       localAiBrowserModelName: String(parsed?.localAiBrowserModelName || ''),
       localAiBrowserModelRepo: String(parsed?.localAiBrowserModelRepo || ''),
@@ -3177,9 +3224,12 @@ function loadSettings() {
 
 function applySettingsSnapshot() {
   state.localAi.runtimeMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || 'auto');
+  state.localAi.baseUrl = normalizeOllamaBaseUrl(state.settings.localAiBaseUrl || state.config.localAiBaseUrl || '');
   state.localAi.modelName = state.settings.localAiModelName || '';
   state.localAi.cachedModelName = state.settings.localAiModelName || '';
   state.localAi.lastSuccessfulCheckAt = state.settings.localAiLastSuccessfulCheckAt || '';
+  state.localAi.lastSuccessfulRuntime = state.settings.localAiLastSuccessfulRuntime || '';
+  state.localAi.lastSuccessfulRuntimeAt = state.settings.localAiLastSuccessfulRuntimeAt || '';
   state.localAi.browser.modelId = state.settings.localAiBrowserModelId || '';
   state.localAi.browser.modelName = state.settings.localAiBrowserModelName || '';
   state.localAi.browser.modelRepo = state.settings.localAiBrowserModelRepo || '';
@@ -3574,13 +3624,24 @@ function readConfig() {
 }
 
 function resolveLocalAiBaseUrl() {
-  const selected = String(state.localAi.baseUrl || '').trim().replace(/\/+$/, '');
+  const selected = normalizeOllamaBaseUrl(state.localAi.baseUrl || state.settings.localAiBaseUrl || state.config.localAiBaseUrl || '');
   if (selected) {
     return selected;
   }
 
-  const configured = String(state.config.localAiBaseUrl || '').trim().replace(/\/+$/, '');
+  const configured = normalizeOllamaBaseUrl(state.config.localAiBaseUrl || '');
   return configured || LOCAL_AI_PROXY_BASE_URL;
+}
+
+function describeLocalAiEndpoint(baseUrl) {
+  const normalized = normalizeOllamaBaseUrl(baseUrl);
+  if (!normalized) {
+    return '';
+  }
+
+  return normalized === OLLAMA_PROXY_BASE_URL
+    ? 'same-origin PHP bridge'
+    : normalized;
 }
 
 function parseInteger(value, fallback) {
