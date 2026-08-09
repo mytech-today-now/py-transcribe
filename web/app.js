@@ -111,9 +111,19 @@ const state = {
   },
   transcriptNotice: '',
   serverBackup: null,
+  serverBackupNotice: '',
+  readme: {
+    status: 'idle',
+    html: '',
+    error: '',
+    requestId: 0
+  },
   durationSeconds: 0,
   currentJobId: 0
 };
+
+let modalScrollLockY = 0;
+let modalScrollLockActive = false;
 
 const refs = {};
 
@@ -133,6 +143,8 @@ function bindRefs() {
   const ids = [
     'hero-title',
     'browserNote',
+    'promoButton',
+    'readmeButton',
     'runtimeState',
     'deviceState',
     'fileState',
@@ -169,6 +181,10 @@ function bindRefs() {
     'transcriptEditor',
     'timedPreview',
     'serverBackupState',
+    'promoDialog',
+    'readmeDialog',
+    'readmeStatus',
+    'readmeContent',
     'recordingState',
     'recordingPreview',
     'recordingPlayer',
@@ -225,6 +241,14 @@ function optionNode(value, label, selected = false) {
 }
 
 function registerEvents() {
+  refs.promoButton.addEventListener('click', () => {
+    openPromoDialog();
+  });
+
+  refs.readmeButton.addEventListener('click', () => {
+    void openReadmeDialog();
+  });
+
   refs.loadRuntimeButton.addEventListener('click', () => {
     void loadRuntime();
   });
@@ -353,6 +377,7 @@ function registerEvents() {
 
   refs.serverCopyToggle.addEventListener('change', () => {
     state.settings.serverCopy = refs.serverCopyToggle.checked;
+    state.serverBackupNotice = '';
     persistSettings();
     renderAll();
   });
@@ -364,11 +389,28 @@ function registerEvents() {
     persistSessionDraft();
     renderDownloadState();
   });
+
+  bindDialogDismiss(refs.promoDialog);
+  bindDialogDismiss(refs.readmeDialog);
+  syncModalScrollLock();
 }
 
 function preventDefaults(event) {
   event.preventDefault();
   event.stopPropagation();
+}
+
+function bindDialogDismiss(dialog) {
+  if (!dialog) {
+    return;
+  }
+
+  dialog.addEventListener('click', (event) => {
+    if (event.target === dialog) {
+      dialog.close();
+    }
+  });
+  dialog.addEventListener('close', syncModalScrollLock);
 }
 
 function updateRuntimeButtonLabel() {
@@ -548,6 +590,8 @@ async function handleFileSelection(file, {
     state.segments = [];
     state.transcriptText = '';
     state.transcriptNotice = '';
+    state.serverBackup = null;
+    state.serverBackupNotice = '';
     state.outputs = { txt: '', srt: '', vtt: '', preview: '' };
     state.durationSeconds = 0;
     if (!preserveRecordingPreview) {
@@ -569,6 +613,10 @@ async function handleFileSelection(file, {
   state.segments = [];
   state.transcriptText = '';
   state.transcriptNotice = '';
+  state.serverBackupNotice = '';
+  if (!state.serverBackup || state.serverBackup.originalName !== file.name || state.serverBackup.size !== file.size) {
+    state.serverBackup = null;
+  }
   state.outputs = { txt: '', srt: '', vtt: '', preview: '' };
   state.durationSeconds = initialDurationSeconds;
   refs.fileInput.value = '';
@@ -843,7 +891,10 @@ function renderAll() {
     : 'Everything stays local unless you enable host backup.';
 
   refs.serverBackupState.textContent = state.settings.serverCopy
-    ? (state.serverBackup ? `Saved to host: ${state.serverBackup.originalName}` : 'Host backup on')
+    ? (
+      state.serverBackupNotice
+        || (state.serverBackup ? `Saved to host: ${state.serverBackup.originalName}` : 'Host backup on')
+    )
     : 'Host backup off';
 
   updateRecordingStatus();
@@ -1001,6 +1052,9 @@ function readConfig() {
     appName: String(injected.appName || 'Py Transcribe Studio'),
     uploadEndpoint: String(injected.uploadEndpoint || 'api/upload.php'),
     downloadEndpoint: String(injected.downloadEndpoint || 'api/download.php'),
+    promoUrl: String(injected.promoUrl || 'https://mytech.today'),
+    readmeApiUrl: String(injected.readmeApiUrl || 'https://api.github.com/repos/mytech-today-now/py-transcribe/readme?ref=main'),
+    readmeSourceUrl: String(injected.readmeSourceUrl || 'https://github.com/mytech-today-now/py-transcribe/blob/main/readme.md'),
     csrfToken: String(injected.csrfToken || ''),
     authRequired: Boolean(injected.authRequired),
     uploadLimitBytes,
@@ -1016,6 +1070,165 @@ function parseInteger(value, fallback) {
 
 function setStatus(message) {
   refs.status.textContent = message;
+}
+
+function toggleDialog(dialog) {
+  if (!dialog) {
+    return false;
+  }
+
+  if (dialog.open) {
+    dialog.close();
+    syncModalScrollLock();
+    return false;
+  }
+
+  if (typeof dialog.showModal === 'function') {
+    dialog.showModal();
+  } else {
+    dialog.setAttribute('open', '');
+  }
+
+  syncModalScrollLock();
+  return true;
+}
+
+function syncModalScrollLock() {
+  if (typeof document === 'undefined') {
+    return;
+  }
+
+  const locked = Boolean(document.querySelector('dialog[open]'));
+  document.documentElement.classList.toggle('modal-open', locked);
+  if (document.body) {
+    document.body.classList.toggle('modal-open', locked);
+    if (locked && !modalScrollLockActive) {
+      modalScrollLockY = window.scrollY || document.documentElement.scrollTop || 0;
+      document.body.style.position = 'fixed';
+      document.body.style.top = `-${modalScrollLockY}px`;
+      document.body.style.left = '0';
+      document.body.style.right = '0';
+      document.body.style.width = '100%';
+      document.body.style.overflow = 'hidden';
+      document.documentElement.style.overflow = 'hidden';
+      modalScrollLockActive = true;
+    } else if (!locked && modalScrollLockActive) {
+      document.body.style.position = '';
+      document.body.style.top = '';
+      document.body.style.left = '';
+      document.body.style.right = '';
+      document.body.style.width = '';
+      document.body.style.overflow = '';
+      document.documentElement.style.overflow = '';
+      modalScrollLockActive = false;
+      window.scrollTo(0, modalScrollLockY);
+    }
+  }
+}
+
+function openPromoDialog() {
+  toggleDialog(refs.promoDialog);
+}
+
+async function openReadmeDialog() {
+  if (!toggleDialog(refs.readmeDialog)) {
+    return;
+  }
+
+  await loadReadme();
+}
+
+async function loadReadme() {
+  if (state.readme.status === 'loading') {
+    return;
+  }
+
+  const requestId = state.readme.requestId + 1;
+  state.readme.requestId = requestId;
+  state.readme.status = 'loading';
+  state.readme.error = '';
+  renderReadmeState();
+
+  try {
+    const response = await fetch(state.config.readmeApiUrl, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/vnd.github.html+json'
+      },
+      cache: 'no-store',
+      credentials: 'omit'
+    });
+
+    const html = await response.text();
+    if (requestId !== state.readme.requestId) {
+      return;
+    }
+
+    if (!response.ok) {
+      throw new Error(`GitHub returned ${response.status} while loading the README.`);
+    }
+
+    state.readme.status = 'loaded';
+    state.readme.html = html;
+    state.readme.error = '';
+    renderReadmeState();
+  } catch (error) {
+    if (requestId !== state.readme.requestId) {
+      return;
+    }
+
+    state.readme.status = 'error';
+    state.readme.html = '';
+    state.readme.error = error instanceof Error
+      ? error.message
+      : 'Could not load the live README.';
+    renderReadmeState();
+  }
+}
+
+function renderReadmeState() {
+  if (!refs.readmeDialog || !refs.readmeStatus || !refs.readmeContent) {
+    return;
+  }
+
+  const loaded = state.readme.status === 'loaded' && Boolean(state.readme.html);
+  if (state.readme.status === 'loading') {
+    refs.readmeStatus.textContent = 'Loading the rendered README from GitHub...';
+  } else if (state.readme.status === 'loaded') {
+    refs.readmeStatus.textContent = 'Rendered from GitHub as HTML so the Markdown and embedded HTML stay styled.';
+  } else if (state.readme.status === 'error') {
+    refs.readmeStatus.textContent = state.readme.error || 'Could not load the live README.';
+  } else {
+    refs.readmeStatus.textContent = 'Open the README icon to load the rendered version from GitHub.';
+  }
+
+  refs.readmeContent.hidden = !loaded;
+  if (!loaded) {
+    refs.readmeContent.replaceChildren();
+    return;
+  }
+
+  refs.readmeContent.innerHTML = state.readme.html;
+  decorateReadmeContent();
+}
+
+function decorateReadmeContent() {
+  if (!refs.readmeContent) {
+    return;
+  }
+
+  refs.readmeContent.querySelectorAll('a').forEach((anchor) => {
+    const href = anchor.getAttribute('href') || '';
+    if (/^https?:\/\//i.test(href)) {
+      anchor.target = '_blank';
+      anchor.rel = 'noopener noreferrer';
+    }
+  });
+
+  refs.readmeContent.querySelectorAll('img').forEach((image) => {
+    image.loading = 'lazy';
+    image.decoding = 'async';
+  });
 }
 
 function updateTranscriptEditor() {
@@ -1133,30 +1346,50 @@ async function uploadServerCopy(file) {
   }
 
   if (state.serverBackup && state.serverBackup.originalName === file.name && state.serverBackup.size === file.size) {
+    state.serverBackupNotice = '';
     return state.serverBackup;
+  }
+
+  const uploadLimitBytes = Number(state.config.uploadLimitBytes);
+  if (Number.isFinite(uploadLimitBytes) && uploadLimitBytes > 0 && file.size > uploadLimitBytes) {
+    state.serverBackup = null;
+    state.serverBackupNotice = `Host backup skipped: ${file.name} is larger than ${formatBytes(uploadLimitBytes)}.`;
+    renderAll();
+    return null;
   }
 
   const form = new FormData();
   form.append('audio', file, file.name);
 
-  const response = await fetch(state.config.uploadEndpoint, {
-    method: 'POST',
-    headers: {
-      'X-CSRF-Token': state.config.csrfToken
-    },
-    body: form,
-    credentials: 'same-origin'
-  });
+  try {
+    const response = await fetch(state.config.uploadEndpoint, {
+      method: 'POST',
+      headers: {
+        'X-CSRF-Token': state.config.csrfToken
+      },
+      body: form,
+      credentials: 'same-origin'
+    });
 
-  const payload = await response.json();
-  if (!response.ok || !payload?.ok) {
-    throw new Error(payload?.error || 'Host backup failed.');
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload?.ok) {
+      state.serverBackup = null;
+      state.serverBackupNotice = payload?.error || `Host backup failed (${response.status}).`;
+      renderAll();
+      return null;
+    }
+
+    state.serverBackup = payload.file;
+    state.serverBackupNotice = '';
+    renderAll();
+    setStatus(`Saved ${file.name} to host storage.`);
+    return payload.file;
+  } catch {
+    state.serverBackup = null;
+    state.serverBackupNotice = 'Host backup unavailable.';
+    renderAll();
+    return null;
   }
-
-  state.serverBackup = payload.file;
-  refs.serverBackupState.textContent = `Saved to host: ${payload.file.originalName}`;
-  setStatus(`Saved ${file.name} to host storage.`);
-  return payload.file;
 }
 
 function registerServiceWorker() {

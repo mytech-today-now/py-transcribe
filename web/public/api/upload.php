@@ -22,6 +22,16 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 
 app_require_csrf();
 
+$maxBytes = app_max_upload_bytes();
+$contentLength = (int) ($_SERVER['CONTENT_LENGTH'] ?? 0);
+if ($contentLength > 0 && $contentLength > $maxBytes) {
+    app_json([
+        'ok' => false,
+        'error' => 'The file is larger than the host upload limit.',
+        'limitBytes' => $maxBytes
+    ], 413);
+}
+
 if (!isset($_FILES['audio'])) {
     app_json([
         'ok' => false,
@@ -30,7 +40,23 @@ if (!isset($_FILES['audio'])) {
 }
 
 $upload = $_FILES['audio'];
-if (!is_array($upload) || ($upload['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+if (!is_array($upload)) {
+    app_json([
+        'ok' => false,
+        'error' => 'Upload failed.'
+    ], 400);
+}
+
+$errorCode = (int) ($upload['error'] ?? UPLOAD_ERR_NO_FILE);
+if ($errorCode === UPLOAD_ERR_INI_SIZE || $errorCode === UPLOAD_ERR_FORM_SIZE) {
+    app_json([
+        'ok' => false,
+        'error' => 'The file is larger than the host upload limit.',
+        'limitBytes' => $maxBytes
+    ], 413);
+}
+
+if ($errorCode !== UPLOAD_ERR_OK) {
     app_json([
         'ok' => false,
         'error' => 'Upload failed.'
@@ -40,7 +66,6 @@ if (!is_array($upload) || ($upload['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ER
 $tmpName = (string) ($upload['tmp_name'] ?? '');
 $originalName = (string) ($upload['name'] ?? 'audio');
 $size = (int) ($upload['size'] ?? 0);
-$errorCode = (int) ($upload['error'] ?? UPLOAD_ERR_NO_FILE);
 
 if ($errorCode !== UPLOAD_ERR_OK || !is_uploaded_file($tmpName)) {
     app_json([
