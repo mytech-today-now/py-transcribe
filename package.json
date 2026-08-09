@@ -16,6 +16,7 @@
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
     "@huggingface/transformers": "^4.2.0",
+    "@wllama/wllama": "^3.5.1",
     "jszip": "^3.10.1"
   },
   "devDependencies": {

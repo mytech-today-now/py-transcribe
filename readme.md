@@ -5,6 +5,7 @@
 <p>
   <strong>Browser-first transcription studio for constrained shared hosting.</strong><br />
   Whisper inference, audio decoding, transcript editing, and export generation all run in the browser.
+  Local AI summaries use Ollama first and can fall back to a browser WASM model cache when the daemon is unavailable.
   PHP stays small and only serves the shell, optional session protection, and optional host-side upload/download helpers.
 </p>
 
@@ -30,7 +31,7 @@
     </td>
     <td>
       <strong>Runtime</strong><br />
-      Vite, browser workers, Whisper, and FFmpeg fallback when the browser cannot decode a file directly.
+      Vite, browser workers, Whisper, FFmpeg fallback, Ollama, and browser WASM local AI.
     </td>
   </tr>
   <tr>
@@ -78,8 +79,11 @@ flowchart LR
   B --> C[Whisper worker]
   C --> D[Editable transcript + subtitle exports]
   D --> E[TXT / SRT / VTT / ZIP downloads]
-  A --> F[Optional PHP upload / download / session protection]
-  F --> G[Shared hosting storage]
+  D --> F[Local AI panel]
+  F --> G[Ollama daemon]
+  F --> H[Browser WASM fallback]
+  A --> I[Optional PHP upload / download / session protection]
+  I --> J[Shared hosting storage]
 ```
 
 ## Key Stack
@@ -100,6 +104,10 @@ flowchart LR
   <tr>
     <td><code>@ffmpeg/ffmpeg</code> + <code>@ffmpeg/util</code></td>
     <td>Codec fallback for files the browser cannot decode on its own.</td>
+  </tr>
+  <tr>
+    <td><code>@wllama/wllama</code></td>
+    <td>Browser WASM local AI fallback for summaries and chat when Ollama is unavailable.</td>
   </tr>
   <tr>
     <td><code>JSZip</code></td>
@@ -159,10 +167,22 @@ package.json
 3. Drop a file, click the drop zone to browse for one, or use `Record Mic` to capture audio from the microphone.
 4. Review a recording in the embedded player if you captured one.
 5. Pick the model, language, task, and cleanup options.
-6. Click `Transcribe`.
-7. Edit the transcript and download TXT, SRT, VTT, or ZIP outputs.
+6. Use the Local AI runtime mode selector to choose `Auto`, `Local only`, or `Browser only`.
+7. Click `Transcribe`.
+8. Edit the transcript, generate a local AI summary if desired, and download TXT, SRT, VTT, or ZIP outputs.
 
 > The app saves settings, the selected file, and transcript data in browser storage on supported browsers, so a refresh should restore the session instead of resetting it.
+
+## Local AI
+
+<details>
+  <summary><strong>Runtime modes</strong></summary>
+
+  - `Auto` checks local Ollama first, then falls back to the browser WASM model cache if Ollama is unavailable.
+  - `Local only` stays on Ollama and never switches to the browser runtime.
+  - `Browser only` uses the cached browser model and skips Ollama entirely.
+  - The browser runtime keeps a small model catalog in `OPFS`, so the first load can take time and consume noticeable storage.
+</details>
 
 ## Limitations
 
@@ -173,6 +193,7 @@ package.json
   - Very large or exotic media files can still be slow or fail in some browsers.
   - Speaker labels are heuristic and not a true diarization system.
   - Translation mode changes transcript presentation, but inference still happens entirely in the browser.
+  - Browser WASM local AI needs a capable desktop browser, enough RAM, and enough persistent storage to cache a GGUF model.
 </details>
 
 ## Troubleshooting

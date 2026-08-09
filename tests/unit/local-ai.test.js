@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildChatSystemPrompt,
   buildSummaryPrompt,
@@ -16,6 +16,10 @@ import {
 } from '../../web/lib/local-ai.js';
 
 describe('local AI helpers', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('builds a detail-aware prompt from the transcript', () => {
     const prompt = buildSummaryPrompt('One line. Two line.', 'detailed');
 
@@ -100,11 +104,23 @@ describe('local AI helpers', () => {
     expect(requests).toEqual(['api/ollama/tags.php']);
   });
 
-  it('prefers loopback Ollama endpoints before the same-origin proxy', () => {
+  it('prefers loopback Ollama endpoints before the configured proxy bridge', () => {
     expect(resolveOllamaBaseUrlCandidates('api/ollama')).toEqual([
       'http://127.0.0.1:11434',
       'http://localhost:11434',
       'api/ollama'
+    ]);
+  });
+
+  it('keeps remote origins on the loopback Ollama candidates only', () => {
+    vi.stubGlobal('location', {
+      protocol: 'https:',
+      hostname: 'mytech.today'
+    });
+
+    expect(resolveOllamaBaseUrlCandidates('api/ollama')).toEqual([
+      'http://127.0.0.1:11434',
+      'http://localhost:11434'
     ]);
   });
 
@@ -116,7 +132,11 @@ describe('local AI helpers', () => {
       fetchImpl: async (url) => {
         requests.push(url);
 
-        if (String(url).startsWith('http://127.0.0.1:11434') || String(url).startsWith('http://localhost:11434')) {
+        if (String(url).startsWith('http://127.0.0.1:11434')) {
+          throw new Error('Failed to fetch');
+        }
+
+        if (String(url).startsWith('http://localhost:11434')) {
           throw new Error('Failed to fetch');
         }
 

@@ -16,6 +16,15 @@ const DEFAULT_OLLAMA_CHAT_LINES = [
   { message: { content: '\n- Main idea.' }, done: false },
   { message: { content: '\n- Action item.' }, done: true }
 ];
+const DEFAULT_BROWSER_AI_SUMMARY_CHUNKS = [
+  'Browser summary.',
+  '\n- Main idea.',
+  '\n- Action item.'
+];
+const DEFAULT_BROWSER_AI_CHAT_CHUNKS = [
+  'Browser reply.',
+  '\n- Action item.'
+];
 
 export function createAudioFile({
   name = 'sample.wav',
@@ -238,7 +247,10 @@ export async function installLocalAiRoutes(page, {
 }
 
 export async function installAppHarness(page, options = {}) {
-  const config = {
+  const {
+    initialSettings,
+    ...config
+  } = {
     whisperMode: 'ready',
     pythonMode: 'ready',
     whisperLoadDelayMs: 0,
@@ -247,21 +259,38 @@ export async function installAppHarness(page, options = {}) {
     renderDelayMs: 0,
     ffmpegLoadDelayMs: 0,
     ffmpegExecDelayMs: 0,
+    browserAiMode: 'ready',
+    browserAiLoadDelayMs: 0,
+    browserAiSummaryChunks: DEFAULT_BROWSER_AI_SUMMARY_CHUNKS,
+    browserAiChatChunks: DEFAULT_BROWSER_AI_CHAT_CHUNKS,
+    browserStorageUsage: 0,
+    browserStorageQuota: 8_000_000_000,
     localAiAutoDownload: false,
     transcriptText: DEFAULT_TRANSCRIPT_TEXT,
     allowRealServiceWorker: false,
     ...options
   };
 
-  await page.addInitScript(({ config: injectedConfig }) => {
+  await page.addInitScript(({ config: injectedConfig, initialSettings: seededSettings }) => {
     window.__TRANSCRIBE_CONFIG__ = Object.assign(window.__TRANSCRIBE_CONFIG__ || {}, {
       ...injectedConfig
     });
+    if (seededSettings && typeof seededSettings === 'object') {
+      window.localStorage.setItem('py-transcribe:shared-hosting-state', JSON.stringify(seededSettings));
+    }
 
     const state = window.__pyTranscribeTestState = {
       config: { ...injectedConfig },
       workers: [],
       workerMessages: [],
+      browserAi: {
+        loadCalls: 0,
+        summarizeCalls: 0,
+        chatCalls: 0,
+        disposeCalls: 0,
+        readyCalls: 0,
+        activeModelIds: []
+      },
       ffmpeg: {
         loadCalls: 0,
         execCalls: 0,
@@ -586,6 +615,193 @@ export async function installAppHarness(page, options = {}) {
       }
     }
 
+    class FakeBrowserAiRuntime {
+      constructor(model, { onStatus, onProgress, logger } = {}) {
+        this.model = model;
+        this.onStatus = onStatus;
+        this.onProgress = onProgress;
+        this.logger = logger;
+        this.ready = false;
+        this.disposed = false;
+      }
+
+      async ensureReady({ model = this.model, forceRefresh = false } = {}) {
+        const selectedModel = model || this.model;
+        if (!selectedModel) {
+          throw new Error('No browser AI model is available.');
+        }
+
+        state.browserAi.loadCalls += 1;
+        state.browserAi.activeModelIds.push(selectedModel.id);
+
+        if (String(state.config.browserAiMode || 'ready') === 'error') {
+          this.onStatus?.({
+            phase: 'loading',
+            model: selectedModel,
+            message: `Loading browser model: ${selectedModel.label}`,
+            detail: forceRefresh
+              ? `Reloading ${selectedModel.label} into the browser runtime.`
+              : `Loading ${selectedModel.label} into the browser runtime.`
+          });
+          throw new Error('Browser model loading failed.');
+        }
+
+        const progressSteps = Array.isArray(state.config.browserAiProgressSteps)
+          ? state.config.browserAiProgressSteps
+          : [25, 50, 100];
+
+        this.onStatus?.({
+          phase: 'loading',
+          model: selectedModel,
+          message: `Loading browser model: ${selectedModel.label}`,
+          detail: forceRefresh
+            ? `Reloading ${selectedModel.label} into the browser runtime.`
+            : `Loading ${selectedModel.label} into the browser runtime.`
+        });
+
+        for (const progress of progressSteps) {
+          this.onProgress?.({
+            phase: 'loading',
+            model: selectedModel,
+            loaded: progress,
+            total: 100,
+            progress,
+            message: `Loading ${selectedModel.label}... (${progress}%)`
+          });
+        }
+
+        const delay = Number(state.config.browserAiLoadDelayMs || 0);
+        if (delay > 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, delay));
+        }
+
+        this.ready = true;
+        state.browserAi.readyCalls += 1;
+        this.onStatus?.({
+          phase: 'ready',
+          model: selectedModel,
+          message: `Using browser model: ${selectedModel.label}`,
+          detail: selectedModel.note || 'Browser WASM runtime ready.'
+        });
+
+        return {
+          model: selectedModel,
+          cached: true
+        };
+      }
+
+      async summarize({
+        transcriptText,
+        detailLevel,
+        model = this.model,
+        signal,
+        onChunk
+      } = {}) {
+        const selectedModel = model || this.model;
+        if (!this.ready) {
+          await this.ensureReady({ model: selectedModel, signal });
+        }
+
+        state.browserAi.summarizeCalls += 1;
+
+        const chunks = Array.isArray(state.config.browserAiSummaryChunks)
+          ? state.config.browserAiSummaryChunks
+          : DEFAULT_BROWSER_AI_SUMMARY_CHUNKS;
+        let summary = '';
+
+        for (const chunk of chunks) {
+          if (signal?.aborted) {
+            throw new Error('AbortError');
+          }
+
+          summary += chunk;
+          onChunk?.(summary, {
+            choices: [
+              {
+                delta: {
+                  content: chunk
+                }
+              }
+            ]
+          });
+        }
+
+        return {
+          summary,
+          preparedTranscript: {
+            text: String(transcriptText || '').trim(),
+            truncated: false,
+            omittedChars: 0,
+            warning: ''
+          },
+          levelKey: String(detailLevel || 'standard'),
+          detail: ''
+        };
+      }
+
+      async chat({
+        transcriptText,
+        summaryText,
+        history = [],
+        userMessage,
+        model = this.model,
+        signal,
+        onChunk
+      } = {}) {
+        const selectedModel = model || this.model;
+        if (!this.ready) {
+          await this.ensureReady({ model: selectedModel, signal });
+        }
+
+        state.browserAi.chatCalls += 1;
+
+        const chunks = Array.isArray(state.config.browserAiChatChunks)
+          ? state.config.browserAiChatChunks
+          : DEFAULT_BROWSER_AI_CHAT_CHUNKS;
+        let reply = '';
+
+        for (const chunk of chunks) {
+          if (signal?.aborted) {
+            throw new Error('AbortError');
+          }
+
+          reply += chunk;
+          onChunk?.(reply, {
+            choices: [
+              {
+                delta: {
+                  content: chunk
+                }
+              }
+            ]
+          });
+        }
+
+        return {
+          reply,
+          preparedTranscript: {
+            text: String(transcriptText || '').trim(),
+            truncated: false,
+            omittedChars: 0,
+            warning: ''
+          },
+          preparedSummary: {
+            text: String(summaryText || '').trim(),
+            truncated: false,
+            omittedChars: 0,
+            warning: ''
+          },
+          history: Array.isArray(history) ? history : [],
+          userMessage: String(userMessage || '')
+        };
+      }
+
+      async dispose() {
+        this.disposed = true;
+        state.browserAi.disposeCalls += 1;
+      }
+    }
+
     class FakeMediaRecorder {
       constructor(stream, options = {}) {
         this.stream = stream;
@@ -653,6 +869,11 @@ export async function installAppHarness(page, options = {}) {
     }
 
     window.__PY_TRANSCRIBE_TEST_HOOKS__ = {
+      createBrowserAiRuntime: ({ model, onStatus, onProgress, logger }) => new FakeBrowserAiRuntime(model, {
+        onStatus,
+        onProgress,
+        logger
+      }),
       createFFmpeg: () => new FakeFFmpeg(),
       fetchFile: async (file) => new Uint8Array(await file.arrayBuffer()),
       getJSZip: undefined,
@@ -687,7 +908,31 @@ export async function installAppHarness(page, options = {}) {
         // Ignore read-only storage persistence overrides.
       }
     }
-  }, { config });
+
+    try {
+      const storageEstimate = async () => ({
+        usage: Number(state.config.browserStorageUsage || 0),
+        quota: Number(state.config.browserStorageQuota || 0)
+      });
+
+      if (window.navigator.storage) {
+        Object.defineProperty(window.navigator.storage, 'estimate', {
+          configurable: true,
+          value: storageEstimate
+        });
+      } else {
+        Object.defineProperty(window.navigator, 'storage', {
+          configurable: true,
+          value: {
+            estimate: storageEstimate,
+            persist: async () => true
+          }
+        });
+      }
+    } catch {
+      // Ignore storage quota override failures.
+    }
+  }, { config, initialSettings });
 }
 
 export async function selectFilesViaButton(page, fileDescriptors) {

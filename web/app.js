@@ -41,6 +41,20 @@ import {
   normalizeLocalAiDetailLevel,
   normalizeLocalAiModelName
 } from './lib/local-ai.js';
+import {
+  BROWSER_AI_MODEL_CATALOG,
+  LOCAL_AI_RUNTIME_MODES,
+  buildBrowserStorageWarning,
+  createBrowserAiRuntime,
+  describeBrowserAiError,
+  estimateBrowserStorageQuota,
+  formatBrowserAiModelLabel,
+  getBrowserAiModelById,
+  normalizeBrowserAiModel,
+  normalizeLocalAiRuntimeMode,
+  resolvePreferredBrowserAiModel,
+  supportsBrowserLocalAi
+} from './lib/browser-ai.js';
 import JSZip from './lib/jszip.js';
 import { createWorkerClient } from './lib/worker-rpc.js';
 import {
@@ -93,13 +107,18 @@ const SESSION_FALLBACK_KEY = 'py-transcribe:shared-hosting-session';
 const DEFAULT_CLIENT_LIMIT = 128 * 1024 * 1024;
 const DEFAULT_SERVER_LIMIT = 16 * 1024 * 1024;
 const LOCAL_AI_CHAT_HISTORY_LIMIT = 16;
+const LOCAL_AI_PROXY_BASE_URL = 'api/ollama';
 const OLLAMA_DOWNLOAD_URL = 'https://ollama.com/download';
 const LOCAL_AI_STATUS_MESSAGES = {
+  connecting: 'Connecting to local Ollama...',
   idle: 'Ollama detected',
   checking: 'Checking Ollama...',
   downloading: 'Downloading Kimi model...',
   ready: 'Model ready',
   summarizing: 'Summarizing...',
+  browserLoading: 'Falling back to browser WASM...',
+  browserReady: 'Browser model ready',
+  browserLoadingModel: 'Loading browser model...',
   unavailable: 'Local AI unavailable'
 };
 
@@ -146,19 +165,51 @@ const state = {
   serverBackup: null,
   serverBackupNotice: '',
   localAi: {
-    supported: shouldAttemptLocalAiDetection(),
+    supported: shouldAttemptLocalAiDetection() || supportsBrowserLocalAi(),
+    ollamaSupported: shouldAttemptLocalAiDetection(),
+    browserSupported: supportsBrowserLocalAi(),
+    runtimeMode: normalizeLocalAiRuntimeMode('auto'),
+    runtimeKind: '',
     available: false,
     status: 'idle',
     message: '',
     detail: '',
     baseUrl: '',
     modelName: '',
+    modelId: '',
     progress: null,
     progressText: '',
     checking: false,
     pulling: false,
     summarizing: false,
     installedModels: [],
+    browser: {
+      modelId: '',
+      modelName: '',
+      modelRepo: '',
+      modelFile: '',
+      modelQuantization: '',
+      modelSizeLabel: '',
+      modelApproxBytes: 0,
+      modelNote: '',
+      loading: false,
+      ready: false,
+      status: 'idle',
+      message: '',
+      detail: '',
+      progress: null,
+      progressText: '',
+      warning: '',
+      error: '',
+      cached: false,
+      loadedAt: '',
+      storageWarning: '',
+      storageUsage: 0,
+      storageQuota: 0,
+      storageSupported: false,
+      runtime: null,
+      loadRequestId: 0
+    },
     summaryText: '',
     summaryExpanded: false,
     summaryDirty: false,
@@ -206,6 +257,9 @@ let restoreRuntimeAfterHydration = false;
 let lastPersistedSettings = '';
 
 const refs = {};
+if (globalThis.__PY_TRANSCRIBE_TEST_HOOKS__) {
+  globalThis.__PY_TRANSCRIBE_APP_STATE__ = state;
+}
 
 document.addEventListener('DOMContentLoaded', bootstrap);
 
@@ -292,6 +346,8 @@ function bindRefs() {
     'summaryCopyButton',
     'summaryExpandButton',
     'summaryDismissButton',
+    'aiRuntimeSelect',
+    'aiRuntimeMeta',
     'summaryDetailBrief',
     'summaryDetailStandard',
     'summaryDetailDetailed',
@@ -338,6 +394,9 @@ function populateSelectors() {
   refs.speakerOne.value = state.settings.speakerNames[0];
   refs.speakerTwo.value = state.settings.speakerNames[1];
   refs.serverCopyToggle.checked = Boolean(state.settings.serverCopy);
+  if (refs.aiRuntimeSelect) {
+    refs.aiRuntimeSelect.value = state.settings.localAiRuntimeMode;
+  }
   refs.summaryDetailBrief.checked = state.settings.summaryDetail === 'brief';
   refs.summaryDetailStandard.checked = state.settings.summaryDetail === 'standard';
   refs.summaryDetailDetailed.checked = state.settings.summaryDetail === 'detailed';
@@ -447,6 +506,13 @@ function registerEvents() {
   refs.aiModelSelect.addEventListener('change', () => {
     updateLocalAiModelSelection(refs.aiModelSelect.value);
   });
+
+  if (refs.aiRuntimeSelect) {
+    refs.aiRuntimeSelect.addEventListener('change', () => {
+      updateLocalAiRuntimeMode(refs.aiRuntimeSelect.value);
+      void initializeLocalAi({ forceRefresh: true });
+    });
+  }
 
   refs.checkAiButton.addEventListener('click', () => {
     void initializeLocalAi({ forceRefresh: true });
@@ -731,8 +797,115 @@ function formatLocalAiModelLabel(model) {
   return details.length ? `${name} · ${details.join(' · ')}` : name;
 }
 
+function resolveCurrentLocalAiRuntimeKind() {
+  const requestedMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto');
+  if (requestedMode === LOCAL_AI_RUNTIME_MODES.browser) {
+    return 'browser';
+  }
+
+  if (requestedMode === LOCAL_AI_RUNTIME_MODES.local) {
+    return 'ollama';
+  }
+
+  if (state.localAi.runtimeKind === 'ollama' || state.localAi.checking || state.localAi.pulling || state.localAi.summarizing) {
+    return 'ollama';
+  }
+
+  if (state.localAi.runtimeKind === 'browser' || state.localAi.browser.loading || state.localAi.browser.ready) {
+    return 'browser';
+  }
+
+  return 'ollama';
+}
+
+function updateLocalAiRuntimeMode(mode, { persist = true } = {}) {
+  const normalized = normalizeLocalAiRuntimeMode(mode);
+  state.localAi.runtimeMode = normalized;
+  state.settings.localAiRuntimeMode = normalized;
+  if (normalized === LOCAL_AI_RUNTIME_MODES.browser) {
+    state.localAi.runtimeKind = 'browser';
+    if (!state.localAi.browser.modelId) {
+      const preferred = resolvePreferredBrowserAiModel({
+        selectedModelId: state.settings.localAiBrowserModelId || '',
+        cachedModelId: state.settings.localAiBrowserModelId || '',
+        deviceMemory: navigator.deviceMemory || 0,
+        hardwareConcurrency: navigator.hardwareConcurrency || 0
+      }).model;
+      if (preferred) {
+        state.localAi.browser.modelId = preferred.id;
+        state.localAi.browser.modelName = preferred.label;
+        state.localAi.browser.modelRepo = preferred.repo;
+        state.localAi.browser.modelFile = preferred.file;
+        state.localAi.browser.modelQuantization = preferred.quantization;
+        state.localAi.browser.modelSizeLabel = preferred.sizeLabel;
+        state.localAi.browser.modelApproxBytes = preferred.approxSizeBytes;
+        state.localAi.browser.modelNote = preferred.note;
+        state.localAi.modelId = preferred.id;
+        state.localAi.modelName = preferred.label;
+      }
+    }
+  }
+
+  if (persist) {
+    persistSettings();
+    renderAll();
+  }
+}
+
 function renderLocalAiModelSelect() {
   if (!refs.aiModelSelect) {
+    return;
+  }
+
+  const runtimeKind = resolveCurrentLocalAiRuntimeKind();
+  if (runtimeKind === 'browser') {
+    const selectedModelId = normalizeLocalAiText(
+      state.localAi.browser.modelId
+        || state.settings.localAiBrowserModelId
+        || resolvePreferredBrowserAiModel({
+          selectedModelId: state.settings.localAiBrowserModelId || '',
+          cachedModelId: state.localAi.browser.modelId || '',
+          deviceMemory: navigator.deviceMemory || 0,
+          hardwareConcurrency: navigator.hardwareConcurrency || 0
+        }).model?.id
+    );
+    const fragment = document.createDocumentFragment();
+    const selectedModel = getBrowserAiModelById(selectedModelId) || resolvePreferredBrowserAiModel({
+      selectedModelId,
+      cachedModelId: state.localAi.browser.modelId || '',
+      deviceMemory: navigator.deviceMemory || 0,
+      hardwareConcurrency: navigator.hardwareConcurrency || 0
+    }).model;
+    const browserModel = selectedModel || BROWSER_AI_MODEL_CATALOG[0] || null;
+
+    for (const optionModel of BROWSER_AI_MODEL_CATALOG) {
+      fragment.appendChild(optionNode(
+        optionModel.id,
+        formatBrowserAiModelLabel(optionModel),
+        optionModel.id === browserModel?.id
+      ));
+    }
+
+    refs.aiModelSelect.replaceChildren(fragment);
+    refs.aiModelSelect.value = browserModel?.id || refs.aiModelSelect.value || '';
+    if (refs.aiModelMeta) {
+      const storageWarning = state.localAi.browser.storageWarning
+        || buildBrowserStorageWarning({
+          usage: state.localAi.browser.storageUsage,
+          quota: state.localAi.browser.storageQuota
+        });
+      refs.aiModelMeta.textContent = [
+        browserModel ? `Browser model: ${formatBrowserAiModelLabel(browserModel)}.` : 'Choose a browser model to load into the WASM runtime.',
+        state.localAi.browser.ready
+          ? 'Loaded from the browser cache.'
+          : 'The selected model will download into browser storage on first use.',
+        state.localAi.browser.cached
+          ? 'Cached in OPFS.'
+          : '',
+        storageWarning
+      ].filter(Boolean).join(' ');
+    }
+
     return;
   }
 
@@ -879,26 +1052,84 @@ function syncLocalAiChatContext() {
 }
 
 function updateLocalAiModelSelection(modelName, { persist = true } = {}) {
-  const nextModelName = normalizeLocalAiText(modelName);
-  if (nextModelName) {
-    state.localAi.modelName = nextModelName;
-    state.settings.localAiModelName = nextModelName;
-    state.localAi.cachedModelName = nextModelName;
-  }
+  const nextValue = normalizeLocalAiText(modelName);
+  const runtimeKind = state.localAi.runtimeKind === 'browser' || normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode) === 'browser'
+    ? 'browser'
+    : 'ollama';
 
-  const installed = isInstalledLocalAiModel(state.localAi.modelName);
-  state.localAi.available = installed;
-  state.localAi.status = installed ? 'ready' : 'idle';
-  state.localAi.message = installed
-    ? LOCAL_AI_STATUS_MESSAGES.ready
-    : LOCAL_AI_STATUS_MESSAGES.idle;
-  state.localAi.detail = installed
-    ? `Using ${state.localAi.modelName} for summaries and chat.`
-    : state.localAi.modelName
-      ? `Selected ${state.localAi.modelName} is not installed yet. Click Download selected model to pull it from Ollama.`
-      : 'Choose an installed model or download the latest Kimi variant.';
-  state.localAi.summaryError = '';
-  state.localAi.chat.error = '';
+  if (runtimeKind === 'browser') {
+    const nextModel = getBrowserAiModelById(nextValue) || resolvePreferredBrowserAiModel({
+      selectedModelId: state.settings.localAiBrowserModelId || state.localAi.browser.modelId || '',
+      cachedModelId: state.settings.localAiBrowserModelId || state.localAi.browser.modelId || '',
+      deviceMemory: navigator.deviceMemory || 0,
+      hardwareConcurrency: navigator.hardwareConcurrency || 0
+    }).model;
+
+    if (nextModel) {
+      state.localAi.browser.modelId = nextModel.id;
+      state.localAi.browser.modelName = nextModel.label;
+      state.localAi.browser.modelRepo = nextModel.repo;
+      state.localAi.browser.modelFile = nextModel.file;
+      state.localAi.browser.modelQuantization = nextModel.quantization;
+      state.localAi.browser.modelSizeLabel = nextModel.sizeLabel;
+      state.localAi.browser.modelApproxBytes = nextModel.approxSizeBytes;
+      state.localAi.browser.modelNote = nextModel.note;
+      state.localAi.modelId = nextModel.id;
+      state.localAi.modelName = nextModel.label;
+      state.localAi.cachedModelName = nextModel.label;
+      state.settings.localAiBrowserModelId = nextModel.id;
+      state.settings.localAiBrowserModelName = nextModel.label;
+      state.settings.localAiBrowserModelRepo = nextModel.repo;
+      state.settings.localAiBrowserModelFile = nextModel.file;
+      state.settings.localAiBrowserModelQuantization = nextModel.quantization;
+      state.settings.localAiBrowserModelSizeLabel = nextModel.sizeLabel;
+      state.settings.localAiBrowserModelApproxBytes = nextModel.approxSizeBytes;
+      state.settings.localAiBrowserModelNote = nextModel.note;
+    }
+
+    state.localAi.available = Boolean(state.localAi.browser.ready);
+    state.localAi.runtimeKind = 'browser';
+    state.localAi.status = state.localAi.browser.ready
+      ? 'ready'
+      : state.localAi.browser.loading
+        ? 'checking'
+        : 'idle';
+    state.localAi.message = state.localAi.browser.ready
+      ? LOCAL_AI_STATUS_MESSAGES.browserReady
+      : state.localAi.browser.loading
+        ? LOCAL_AI_STATUS_MESSAGES.browserLoadingModel
+        : LOCAL_AI_STATUS_MESSAGES.browserLoading;
+    state.localAi.detail = state.localAi.browser.ready
+      ? `Using ${state.localAi.browser.modelName || nextValue || 'the browser model'} for summaries and chat.`
+      : state.localAi.browser.modelName
+        ? `Selected ${state.localAi.browser.modelName} will load in the browser runtime.`
+        : 'Choose a browser model to load into the WASM runtime.';
+    state.localAi.summaryError = '';
+    state.localAi.chat.error = '';
+  } else {
+    const nextModelName = normalizeLocalAiText(nextValue);
+    if (nextModelName) {
+      state.localAi.modelName = nextModelName;
+      state.localAi.modelId = nextModelName;
+      state.settings.localAiModelName = nextModelName;
+      state.localAi.cachedModelName = nextModelName;
+    }
+
+    const installed = isInstalledLocalAiModel(state.localAi.modelName);
+    state.localAi.runtimeKind = 'ollama';
+    state.localAi.available = installed;
+    state.localAi.status = installed ? 'ready' : 'idle';
+    state.localAi.message = installed
+      ? LOCAL_AI_STATUS_MESSAGES.ready
+      : LOCAL_AI_STATUS_MESSAGES.idle;
+    state.localAi.detail = installed
+      ? `Using ${state.localAi.modelName} for summaries and chat.`
+      : state.localAi.modelName
+        ? `Selected ${state.localAi.modelName} is not installed yet. Click Download selected model to pull it from Ollama.`
+        : 'Choose an installed model or download the latest Kimi variant.';
+    state.localAi.summaryError = '';
+    state.localAi.chat.error = '';
+  }
 
   if (persist) {
     persistSettings();
@@ -913,15 +1144,27 @@ function renderLocalAiState() {
 
   const transcriptState = syncLocalAiChatContext();
   const transcriptPresent = Boolean(normalizeLocalAiText(transcriptState.transcriptText));
-  const isWorking = state.localAi.checking || state.localAi.pulling || state.localAi.summarizing || state.localAi.chat.sending;
+  const runtimeKind = resolveCurrentLocalAiRuntimeKind();
+  const browserWorking = state.localAi.browser.loading;
+  const isWorking = state.localAi.checking || state.localAi.pulling || state.localAi.summarizing || state.localAi.chat.sending || browserWorking;
   const hasSummary = Boolean(state.localAi.summaryText);
   const hasError = Boolean(state.localAi.summaryError);
   const shouldShowSummary = hasSummary || hasError;
   const detailLevel = LOCAL_AI_DETAIL_LEVELS[selectedSummaryDetail()];
-  const selectedModelName = normalizeLocalAiText(state.localAi.modelName || state.settings.localAiModelName);
-  const modelIsInstalled = selectedModelName ? isInstalledLocalAiModel(selectedModelName) : false;
+  const selectedModelName = normalizeLocalAiText(runtimeKind === 'browser'
+    ? state.localAi.browser.modelName || state.settings.localAiBrowserModelName || state.localAi.modelName
+    : state.localAi.modelName || state.settings.localAiModelName);
+  const modelIsInstalled = runtimeKind === 'browser'
+    ? Boolean(state.localAi.browser.ready)
+    : selectedModelName
+      ? isInstalledLocalAiModel(selectedModelName)
+      : false;
   const summarySignature = state.localAi.summaryContextSignature || '';
   const transcriptSignature = buildLocalAiTextSignature(transcriptState.transcriptText);
+  const browserStorageWarning = state.localAi.browser.storageWarning || buildBrowserStorageWarning({
+    usage: state.localAi.browser.storageUsage,
+    quota: state.localAi.browser.storageQuota
+  });
 
   state.localAi.summaryDirty = Boolean(hasSummary && summarySignature && summarySignature !== transcriptSignature);
   const summaryIsStale = Boolean(state.localAi.summaryText && state.localAi.summaryDirty);
@@ -932,22 +1175,43 @@ function renderLocalAiState() {
     state.localAi.chat.detail = 'Regenerate the summary before starting a chat session.';
   }
 
-  refs.aiState.textContent = state.localAi.message || (state.localAi.supported ? 'Not checked yet' : LOCAL_AI_STATUS_MESSAGES.unavailable);
-  refs.aiDetail.textContent = state.localAi.detail || (state.localAi.supported
-    ? 'Check Ollama to download the latest Kimi model.'
-    : `Install Ollama from ${OLLAMA_DOWNLOAD_URL} to enable summaries and chat.`);
+  refs.aiState.textContent = browserWorking
+    ? state.localAi.browser.message || state.localAi.message || LOCAL_AI_STATUS_MESSAGES.browserLoading
+    : state.localAi.message || (state.localAi.supported ? 'Not checked yet' : LOCAL_AI_STATUS_MESSAGES.unavailable);
+  refs.aiDetail.textContent = browserWorking || runtimeKind === 'browser'
+    ? state.localAi.browser.detail || state.localAi.detail || 'Load a browser model into the WASM runtime.'
+    : state.localAi.detail || (state.localAi.supported
+      ? 'Check Ollama to download the latest Kimi model.'
+      : `Install Ollama from ${OLLAMA_DOWNLOAD_URL} to enable summaries and chat.`);
   renderLocalAiModelSelect();
-  refs.checkAiButton.textContent = state.localAi.status === 'unavailable'
-    ? 'Retry Ollama'
-    : state.localAi.checking
-    ? 'Checking...'
-    : state.localAi.pulling
-      ? 'Downloading...'
+  if (refs.aiRuntimeMeta) {
+    const runtimeMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto');
+    refs.aiRuntimeMeta.textContent = runtimeMode === LOCAL_AI_RUNTIME_MODES.browser
+      ? 'Browser-only mode uses the cached Kimi GGUF model in OPFS.'
+      : runtimeMode === LOCAL_AI_RUNTIME_MODES.local
+        ? 'Local-only mode prefers Ollama and does not switch to the browser model cache.'
+        : 'Auto mode checks local Ollama first, then falls back to the browser WASM model if needed.';
+    if (browserStorageWarning) {
+      refs.aiRuntimeMeta.textContent = `${refs.aiRuntimeMeta.textContent} ${browserStorageWarning}`;
+    }
+  }
+  refs.checkAiButton.textContent = runtimeKind === 'browser'
+    ? browserWorking
+      ? 'Loading browser model...'
       : modelIsInstalled
-        ? 'Refresh local AI'
-        : selectedModelName && isLocalAiPullCandidate(selectedModelName)
-          ? 'Download selected model'
-          : 'Download latest Kimi model';
+        ? 'Refresh browser model'
+        : 'Load browser model'
+    : state.localAi.status === 'unavailable'
+      ? 'Retry Ollama'
+      : state.localAi.checking
+        ? 'Checking...'
+        : state.localAi.pulling
+          ? 'Downloading...'
+          : modelIsInstalled
+            ? 'Refresh local AI'
+            : selectedModelName && isLocalAiPullCandidate(selectedModelName)
+              ? 'Download selected model'
+              : 'Download latest Kimi model';
   refs.checkAiButton.disabled = !state.localAi.supported || isWorking;
   refs.summarizeButton.textContent = state.localAi.summarizing ? 'Summarizing...' : 'Summarize transcript';
   refs.summarizeButton.disabled = !state.localAi.supported
@@ -957,7 +1221,7 @@ function renderLocalAiState() {
     || isWorking;
   refs.cancelAiButton.hidden = !isWorking;
   refs.cancelAiButton.disabled = !isWorking;
-  refs.aiProgress.hidden = !state.localAi.pulling;
+  refs.aiProgress.hidden = !state.localAi.pulling && !browserWorking;
 
   if (state.localAi.pulling) {
     const progressValue = Number(state.localAi.progress);
@@ -967,6 +1231,14 @@ function renderLocalAiState() {
       refs.aiProgressBar.removeAttribute('value');
     }
     refs.aiProgressText.textContent = state.localAi.progressText || 'Downloading Kimi model...';
+  } else if (browserWorking) {
+    const progressValue = Number(state.localAi.browser.progress);
+    if (Number.isFinite(progressValue)) {
+      refs.aiProgressBar.value = Math.max(0, Math.min(100, progressValue));
+    } else {
+      refs.aiProgressBar.removeAttribute('value');
+    }
+    refs.aiProgressText.textContent = state.localAi.browser.progressText || state.localAi.browser.detail || 'Loading browser model...';
   } else {
     refs.aiProgressBar.removeAttribute('value');
     refs.aiProgressText.textContent = state.localAi.progressText || state.localAi.detail || '';
@@ -1010,13 +1282,17 @@ function renderLocalAiState() {
   refs.summaryExpandButton.textContent = state.localAi.summaryExpanded ? 'Collapse' : 'Expand';
   refs.summaryCopyButton.disabled = !hasSummary;
   refs.summaryDismissButton.disabled = !hasSummary && !hasError && !state.localAi.summaryDirty;
-  refs.checkAiButton.title = modelIsInstalled
-    ? 'Refresh the installed Kimi model list from Ollama.'
-    : selectedModelName && isLocalAiPullCandidate(selectedModelName)
-      ? 'Download the selected Kimi model from Ollama.'
-      : state.localAi.status === 'unavailable'
-        ? `Retry Ollama after installing it from ${OLLAMA_DOWNLOAD_URL} on this desktop browser.`
-        : 'Check Ollama and download the latest Kimi model.';
+  refs.checkAiButton.title = runtimeKind === 'browser'
+    ? modelIsInstalled
+      ? 'Reload the browser model from OPFS.'
+      : 'Download the selected browser model into OPFS.'
+    : modelIsInstalled
+      ? 'Refresh the installed Kimi model list from Ollama.'
+      : selectedModelName && isLocalAiPullCandidate(selectedModelName)
+        ? 'Download the selected Kimi model from Ollama.'
+        : state.localAi.status === 'unavailable'
+          ? `Retry Ollama after installing it from ${OLLAMA_DOWNLOAD_URL} on this desktop browser.`
+          : 'Check Ollama and download the latest Kimi model.';
   refs.summarizeButton.title = transcriptPresent
     ? `${detailLevel.label} summaries stay local to this browser.`
     : 'Add a transcript before summarizing.';
@@ -1187,6 +1463,7 @@ function cancelLocalAiWork({ silent = false } = {}) {
 }
 
 function setLocalAiUnavailable(detail, { keepModel = false } = {}) {
+  state.localAi.runtimeKind = 'ollama';
   state.localAi.available = false;
   state.localAi.checking = false;
   state.localAi.pulling = false;
@@ -1208,6 +1485,7 @@ function setLocalAiUnavailable(detail, { keepModel = false } = {}) {
 function setLocalAiReady(model, { source = 'installed', checkedAt = new Date().toISOString() } = {}) {
   const modelName = normalizeLocalAiModelName(model);
   state.localAi.available = true;
+  state.localAi.runtimeKind = 'ollama';
   state.localAi.checking = false;
   state.localAi.pulling = false;
   state.localAi.summarizing = false;
@@ -1220,12 +1498,219 @@ function setLocalAiReady(model, { source = 'installed', checkedAt = new Date().t
   state.localAi.progressText = '';
   state.localAi.summaryError = '';
   state.localAi.activeController = null;
+  state.localAi.browser.loading = false;
+  state.localAi.browser.ready = false;
+  state.localAi.browser.status = 'idle';
+  state.localAi.browser.message = '';
+  state.localAi.browser.detail = '';
+  state.localAi.browser.progress = null;
+  state.localAi.browser.progressText = '';
+  if (state.localAi.browser.runtime?.dispose) {
+    void state.localAi.browser.runtime.dispose().catch(() => {});
+  }
+  state.localAi.browser.runtime = null;
   state.localAi.modelName = modelName;
   state.localAi.cachedModelName = modelName;
   state.localAi.lastSuccessfulCheckAt = checkedAt;
   state.settings.localAiModelName = modelName;
   state.settings.localAiLastSuccessfulCheckAt = checkedAt;
   persistSettings();
+  renderAll();
+}
+
+async function setBrowserLocalAiLoading(model, { requestId = 0, forceRefresh = false } = {}) {
+  const selectedModel = normalizeBrowserAiModel(model) || resolvePreferredBrowserAiModel({
+    selectedModelId: state.settings.localAiBrowserModelId || '',
+    cachedModelId: state.localAi.browser.modelId || '',
+    deviceMemory: navigator.deviceMemory || 0,
+    hardwareConcurrency: navigator.hardwareConcurrency || 0
+  }).model;
+
+  if (!selectedModel) {
+    throw new Error('No browser AI model is available.');
+  }
+
+  state.localAi.runtimeKind = 'browser';
+  state.localAi.available = false;
+  state.localAi.checking = false;
+  state.localAi.pulling = false;
+  state.localAi.summarizing = false;
+  state.localAi.status = 'checking';
+  state.localAi.message = LOCAL_AI_STATUS_MESSAGES.browserLoading;
+  state.localAi.detail = forceRefresh
+    ? `Reloading ${formatBrowserAiModelLabel(selectedModel)} into the browser runtime.`
+    : `Loading ${formatBrowserAiModelLabel(selectedModel)} into the browser runtime.`;
+  state.localAi.progress = null;
+  state.localAi.progressText = 'Preparing browser model...';
+  state.localAi.summaryError = '';
+  state.localAi.browser.modelId = selectedModel.id;
+  state.localAi.browser.modelName = selectedModel.label;
+  state.localAi.browser.modelRepo = selectedModel.repo;
+  state.localAi.browser.modelFile = selectedModel.file;
+  state.localAi.browser.modelQuantization = selectedModel.quantization;
+  state.localAi.browser.modelSizeLabel = selectedModel.sizeLabel;
+  state.localAi.browser.modelApproxBytes = selectedModel.approxSizeBytes;
+  state.localAi.browser.modelNote = selectedModel.note;
+  state.localAi.browser.loading = true;
+  state.localAi.browser.ready = false;
+  state.localAi.browser.status = 'loading';
+  state.localAi.browser.message = LOCAL_AI_STATUS_MESSAGES.browserLoading;
+  state.localAi.browser.detail = forceRefresh
+    ? `Reloading ${formatBrowserAiModelLabel(selectedModel)} from the browser cache.`
+    : `Loading ${formatBrowserAiModelLabel(selectedModel)} into the browser cache.`;
+  state.localAi.browser.progress = null;
+  state.localAi.browser.progressText = 'Preparing browser model...';
+  state.localAi.browser.error = '';
+  state.localAi.browser.warning = '';
+  state.localAi.browser.loadRequestId = requestId;
+  state.localAi.browser.runtime = null;
+  state.localAi.modelId = selectedModel.id;
+  state.localAi.modelName = selectedModel.label;
+  state.settings.localAiBrowserModelId = selectedModel.id;
+  state.settings.localAiBrowserModelName = selectedModel.label;
+  state.settings.localAiBrowserModelRepo = selectedModel.repo;
+  state.settings.localAiBrowserModelFile = selectedModel.file;
+  state.settings.localAiBrowserModelQuantization = selectedModel.quantization;
+  state.settings.localAiBrowserModelSizeLabel = selectedModel.sizeLabel;
+  state.settings.localAiBrowserModelApproxBytes = selectedModel.approxSizeBytes;
+  state.settings.localAiBrowserModelNote = selectedModel.note;
+  renderAll();
+
+  const storage = await estimateBrowserStorageQuota();
+  state.localAi.browser.storageSupported = storage.supported;
+  state.localAi.browser.storageUsage = storage.usage;
+  state.localAi.browser.storageQuota = storage.quota;
+  state.localAi.browser.storageWarning = storage.warning;
+  if (storage.warning) {
+    state.localAi.browser.warning = storage.warning;
+  }
+
+  renderAll();
+  return selectedModel;
+}
+
+function updateBrowserLocalAiProgress(progress, { model } = {}) {
+  const selectedModel = normalizeBrowserAiModel(model) || getBrowserAiModelById(state.localAi.browser.modelId);
+  const progressValue = Number.isFinite(progress?.progress)
+    ? Math.round(progress.progress)
+    : Number.isFinite(progress?.loaded) && Number.isFinite(progress?.total) && progress.total > 0
+      ? Math.round((progress.loaded / progress.total) * 100)
+      : null;
+  state.localAi.runtimeKind = 'browser';
+  state.localAi.available = false;
+  state.localAi.status = 'checking';
+  state.localAi.message = progressValue == null
+    ? LOCAL_AI_STATUS_MESSAGES.browserLoading
+    : `${LOCAL_AI_STATUS_MESSAGES.browserLoading} (${progressValue}%)`;
+  state.localAi.detail = progress?.message
+    ? String(progress.message)
+    : selectedModel
+      ? `Loading ${formatBrowserAiModelLabel(selectedModel)} into the browser cache.`
+      : 'Loading the browser model into the WASM runtime.';
+  state.localAi.progress = progressValue;
+  state.localAi.progressText = progress?.message || state.localAi.detail || '';
+  state.localAi.browser.loading = true;
+  state.localAi.browser.ready = false;
+  state.localAi.browser.status = 'loading';
+  state.localAi.browser.message = state.localAi.message;
+  state.localAi.browser.detail = state.localAi.detail;
+  state.localAi.browser.progress = progressValue;
+  state.localAi.browser.progressText = progress?.message || state.localAi.detail || '';
+  if (selectedModel) {
+    state.localAi.browser.modelId = selectedModel.id;
+    state.localAi.browser.modelName = selectedModel.label;
+    state.localAi.browser.modelRepo = selectedModel.repo;
+    state.localAi.browser.modelFile = selectedModel.file;
+    state.localAi.browser.modelQuantization = selectedModel.quantization;
+    state.localAi.browser.modelSizeLabel = selectedModel.sizeLabel;
+    state.localAi.browser.modelApproxBytes = selectedModel.approxSizeBytes;
+    state.localAi.browser.modelNote = selectedModel.note;
+    state.localAi.modelId = selectedModel.id;
+    state.localAi.modelName = selectedModel.label;
+  }
+  renderAll();
+}
+
+function setBrowserLocalAiReady(model, { cached = true, loadedAt = new Date().toISOString() } = {}) {
+  const selectedModel = normalizeBrowserAiModel(model) || getBrowserAiModelById(state.localAi.browser.modelId);
+  if (!selectedModel) {
+    throw new Error('No browser AI model is available.');
+  }
+
+  state.localAi.runtimeKind = 'browser';
+  state.localAi.available = true;
+  state.localAi.checking = false;
+  state.localAi.pulling = false;
+  state.localAi.summarizing = false;
+  state.localAi.status = 'ready';
+  state.localAi.message = LOCAL_AI_STATUS_MESSAGES.browserReady;
+  state.localAi.detail = `Using ${formatBrowserAiModelLabel(selectedModel)} for summaries and chat.`;
+  state.localAi.progress = null;
+  state.localAi.progressText = '';
+  state.localAi.summaryError = '';
+  state.localAi.activeController = null;
+  state.localAi.modelId = selectedModel.id;
+  state.localAi.modelName = selectedModel.label;
+  state.localAi.cachedModelName = selectedModel.label;
+  state.localAi.browser.modelId = selectedModel.id;
+  state.localAi.browser.modelName = selectedModel.label;
+  state.localAi.browser.modelRepo = selectedModel.repo;
+  state.localAi.browser.modelFile = selectedModel.file;
+  state.localAi.browser.modelQuantization = selectedModel.quantization;
+  state.localAi.browser.modelSizeLabel = selectedModel.sizeLabel;
+  state.localAi.browser.modelApproxBytes = selectedModel.approxSizeBytes;
+  state.localAi.browser.modelNote = selectedModel.note;
+  state.localAi.browser.loading = false;
+  state.localAi.browser.ready = true;
+  state.localAi.browser.status = 'ready';
+  state.localAi.browser.message = LOCAL_AI_STATUS_MESSAGES.browserReady;
+  state.localAi.browser.detail = `Using ${formatBrowserAiModelLabel(selectedModel)} for summaries and chat.`;
+  state.localAi.browser.progress = null;
+  state.localAi.browser.progressText = '';
+  state.localAi.browser.error = '';
+  state.localAi.browser.cached = Boolean(cached);
+  state.localAi.browser.loadedAt = loadedAt;
+  state.localAi.browser.runtime = state.localAi.browser.runtime || null;
+  state.settings.localAiBrowserModelId = selectedModel.id;
+  state.settings.localAiBrowserModelName = selectedModel.label;
+  state.settings.localAiBrowserModelRepo = selectedModel.repo;
+  state.settings.localAiBrowserModelFile = selectedModel.file;
+  state.settings.localAiBrowserModelQuantization = selectedModel.quantization;
+  state.settings.localAiBrowserModelSizeLabel = selectedModel.sizeLabel;
+  state.settings.localAiBrowserModelApproxBytes = selectedModel.approxSizeBytes;
+  state.settings.localAiBrowserModelNote = selectedModel.note;
+  state.settings.localAiModelName = selectedModel.label;
+  state.settings.localAiLastSuccessfulCheckAt = loadedAt;
+  persistSettings();
+  renderAll();
+}
+
+function setBrowserLocalAiUnavailable(detail, { keepModel = false } = {}) {
+  state.localAi.runtimeKind = 'browser';
+  state.localAi.available = false;
+  state.localAi.checking = false;
+  state.localAi.pulling = false;
+  state.localAi.summarizing = false;
+  state.localAi.status = 'unavailable';
+  state.localAi.message = LOCAL_AI_STATUS_MESSAGES.unavailable;
+  state.localAi.detail = detail || 'The browser model could not be loaded.';
+  state.localAi.progress = null;
+  state.localAi.progressText = '';
+  state.localAi.summaryError = '';
+  state.localAi.activeController = null;
+  state.localAi.browser.loading = false;
+  state.localAi.browser.ready = false;
+  state.localAi.browser.status = 'unavailable';
+  state.localAi.browser.message = LOCAL_AI_STATUS_MESSAGES.unavailable;
+  state.localAi.browser.detail = detail || 'The browser model could not be loaded.';
+  state.localAi.browser.progress = null;
+  state.localAi.browser.progressText = '';
+  state.localAi.browser.error = detail || '';
+  state.localAi.browser.runtime = null;
+  if (!keepModel) {
+    state.localAi.modelId = state.localAi.browser.modelId || '';
+    state.localAi.modelName = state.localAi.browser.modelName || '';
+  }
   renderAll();
 }
 
@@ -1246,7 +1731,21 @@ function updateLocalAiDownloadProgress(progress) {
 }
 
 async function initializeLocalAi({ forceRefresh = false } = {}) {
-  if (!state.localAi.supported) {
+  const runtimeMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto');
+  state.localAi.runtimeMode = runtimeMode;
+  const browserCapable = supportsBrowserLocalAi() && state.localAi.browserSupported;
+
+  if (runtimeMode === LOCAL_AI_RUNTIME_MODES.browser) {
+    await initializeBrowserLocalAi({ forceRefresh });
+    return;
+  }
+
+  if (!state.localAi.ollamaSupported) {
+    if (browserCapable && runtimeMode !== LOCAL_AI_RUNTIME_MODES.local) {
+      await initializeBrowserLocalAi({ forceRefresh });
+      return;
+    }
+
     setLocalAiUnavailable('Local AI unavailable – install Ollama to enable summaries and chat.');
     return;
   }
@@ -1307,6 +1806,18 @@ async function initializeLocalAi({ forceRefresh = false } = {}) {
     }
 
     if (!forceRefresh) {
+      if (browserCapable && runtimeMode !== LOCAL_AI_RUNTIME_MODES.local) {
+        state.localAi.checking = false;
+        state.localAi.pulling = false;
+        state.localAi.summarizing = false;
+        state.localAi.activeController = null;
+        await initializeBrowserLocalAi({
+          forceRefresh,
+          reason: 'ollama-no-model'
+        });
+        return;
+      }
+
       state.localAi.available = false;
       state.localAi.checking = false;
       state.localAi.pulling = false;
@@ -1391,6 +1902,18 @@ async function initializeLocalAi({ forceRefresh = false } = {}) {
       return;
     }
 
+    if (browserCapable && runtimeMode !== LOCAL_AI_RUNTIME_MODES.local) {
+      state.localAi.checking = false;
+      state.localAi.pulling = false;
+      state.localAi.summarizing = false;
+      state.localAi.activeController = null;
+      await initializeBrowserLocalAi({
+        forceRefresh,
+        reason: 'ollama-error'
+      });
+      return;
+    }
+
     const wasPulling = state.localAi.pulling;
     state.localAi.available = false;
     state.localAi.checking = false;
@@ -1417,6 +1940,116 @@ async function initializeLocalAi({ forceRefresh = false } = {}) {
     if (requestId === state.localAi.checkRequestId) {
       state.localAi.checking = false;
       state.localAi.pulling = false;
+      state.localAi.activeController = null;
+      renderAll();
+    }
+  }
+}
+
+async function initializeBrowserLocalAi({ forceRefresh = false, reason = 'fallback' } = {}) {
+  if (!state.localAi.browserSupported) {
+    setBrowserLocalAiUnavailable('Browser WASM local AI is not supported in this browser.');
+    return;
+  }
+
+  if (state.localAi.checking || state.localAi.pulling || state.localAi.summarizing || state.localAi.browser.loading) {
+    cancelLocalAiWork({ silent: true });
+  }
+
+  const selection = resolvePreferredBrowserAiModel({
+    selectedModelId: state.settings.localAiBrowserModelId || state.localAi.browser.modelId || '',
+    cachedModelId: state.localAi.browser.cached
+      ? state.localAi.browser.modelId || ''
+      : state.settings.localAiBrowserModelId || state.localAi.browser.modelId || '',
+    deviceMemory: navigator.deviceMemory || 0,
+    hardwareConcurrency: navigator.hardwareConcurrency || 0
+  });
+
+  if (!selection.model) {
+    setBrowserLocalAiUnavailable('No browser model is available.');
+    return;
+  }
+
+  const requestId = state.localAi.browser.loadRequestId + 1;
+  state.localAi.browser.loadRequestId = requestId;
+  const controller = new AbortController();
+  state.localAi.activeController = controller;
+  let runtime = null;
+
+  try {
+    await setBrowserLocalAiLoading(selection.model, {
+      requestId,
+      forceRefresh
+    });
+
+    runtime = await createBrowserAiRuntime({
+      model: selection.model,
+      onStatus: (status) => {
+        if (controller.signal.aborted || requestId !== state.localAi.browser.loadRequestId) {
+          return;
+        }
+
+        if (status?.message) {
+          state.localAi.browser.message = String(status.message);
+          state.localAi.message = String(status.message);
+        }
+        if (status?.detail) {
+          state.localAi.browser.detail = String(status.detail);
+          state.localAi.detail = String(status.detail);
+        }
+        renderAll();
+      },
+      onProgress: (progress) => {
+        if (controller.signal.aborted || requestId !== state.localAi.browser.loadRequestId) {
+          return;
+        }
+
+        updateBrowserLocalAiProgress(progress, {
+          model: selection.model
+        });
+      }
+    });
+
+    state.localAi.browser.runtime = runtime;
+    const ready = await runtime.ensureReady({
+      model: selection.model,
+      forceRefresh,
+      signal: controller.signal
+    });
+
+    if (controller.signal.aborted || requestId !== state.localAi.browser.loadRequestId) {
+      return;
+    }
+
+    state.localAi.browser.cached = Boolean(ready?.cached);
+    setBrowserLocalAiReady(selection.model, {
+      cached: Boolean(ready?.cached),
+      loadedAt: new Date().toISOString()
+    });
+    state.localAi.browser.warning = state.localAi.browser.storageWarning || '';
+    setStatus(`Browser model ready: ${formatBrowserAiModelLabel(selection.model)}.`);
+    renderAll();
+  } catch (error) {
+    if (runtime?.dispose) {
+      await runtime.dispose().catch(() => {});
+    }
+    if (state.localAi.browser.runtime === runtime) {
+      state.localAi.browser.runtime = null;
+    }
+    if (controller.signal.aborted || requestId !== state.localAi.browser.loadRequestId) {
+      return;
+    }
+
+    const detail = describeBrowserAiError(error, {
+      phase: 'connect',
+      modelName: selection.model.label
+    });
+    setBrowserLocalAiUnavailable(detail);
+    state.localAi.browser.error = detail;
+    setStatus(detail);
+  } finally {
+    if (requestId === state.localAi.browser.loadRequestId) {
+      state.localAi.browser.loading = false;
       state.localAi.activeController = null;
       renderAll();
     }
@@ -1459,16 +2092,31 @@ async function summarizeCurrentTranscript() {
   state.localAi.summarySourceChars = transcript.length;
   state.localAi.summaryContextSignature = buildLocalAiTextSignature(transcript);
   const localAiBaseUrl = resolveLocalAiBaseUrl();
+  const runtimeMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto');
+  const runtimeKind = runtimeMode === LOCAL_AI_RUNTIME_MODES.local
+    ? 'ollama'
+    : state.localAi.browser.ready && state.localAi.browser.runtime
+      ? 'browser'
+      : resolveCurrentLocalAiRuntimeKind();
+  const activeModelName = runtimeKind === 'browser'
+    ? state.localAi.browser.modelName || state.localAi.modelName
+    : state.localAi.modelName;
   renderAll();
 
   try {
-    const result = await summarizeWithOllama({
-      modelName: state.localAi.modelName,
-      transcriptText: transcript,
-      detailLevel,
-      baseUrl: localAiBaseUrl,
-      signal: controller.signal
-    });
+    const result = runtimeKind === 'browser'
+      ? await state.localAi.browser.runtime.summarize({
+        transcriptText: transcript,
+        detailLevel,
+        signal: controller.signal
+      })
+      : await summarizeWithOllama({
+        modelName: state.localAi.modelName,
+        transcriptText: transcript,
+        detailLevel,
+        baseUrl: localAiBaseUrl,
+        signal: controller.signal
+      });
 
     if (controller.signal.aborted || requestId !== state.localAi.summarizeRequestId) {
       return;
@@ -1483,14 +2131,18 @@ async function summarizeCurrentTranscript() {
     state.localAi.summaryDirty = false;
     state.localAi.summarySourceChars = transcript.length;
     state.localAi.summaryDetailLevel = detailLevel;
-    state.localAi.summaryModelName = state.localAi.modelName;
+    state.localAi.summaryModelName = activeModelName;
     state.localAi.summaryContextSignature = buildLocalAiTextSignature(transcript);
     state.localAi.summarizing = false;
     state.localAi.status = 'ready';
-    state.localAi.message = LOCAL_AI_STATUS_MESSAGES.ready;
-    state.localAi.detail = `Summarized with ${state.localAi.modelName} at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`;
+    state.localAi.message = runtimeKind === 'browser'
+      ? LOCAL_AI_STATUS_MESSAGES.browserReady
+      : LOCAL_AI_STATUS_MESSAGES.ready;
+    state.localAi.detail = runtimeKind === 'browser'
+      ? `Summarized with ${activeModelName} in the browser runtime at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`
+      : `Summarized with ${state.localAi.modelName} at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`;
     state.localAi.activeController = null;
-    setStatus(`Summary ready with ${state.localAi.modelName}.`);
+    setStatus(`Summary ready with ${activeModelName}.`);
     renderAll();
   } catch (error) {
     if (controller.signal.aborted || requestId !== state.localAi.summarizeRequestId) {
@@ -1500,12 +2152,21 @@ async function summarizeCurrentTranscript() {
     state.localAi.summarizing = false;
     state.localAi.activeController = null;
     state.localAi.status = 'ready';
-    state.localAi.message = LOCAL_AI_STATUS_MESSAGES.ready;
-    state.localAi.detail = 'Summarization failed. You can retry with a different detail level.';
-    state.localAi.summaryError = describeLocalAiError(error, {
-      phase: 'summary',
-      baseUrl: resolveLocalAiBaseUrl()
-    });
+    state.localAi.message = runtimeKind === 'browser'
+      ? LOCAL_AI_STATUS_MESSAGES.browserReady
+      : LOCAL_AI_STATUS_MESSAGES.ready;
+    state.localAi.detail = runtimeKind === 'browser'
+      ? 'Browser summarization failed. You can retry with a smaller browser model or a different detail level.'
+      : 'Summarization failed. You can retry with a different detail level.';
+    state.localAi.summaryError = runtimeKind === 'browser'
+      ? describeBrowserAiError(error, {
+        phase: 'summary',
+        modelName: activeModelName
+      })
+      : describeLocalAiError(error, {
+        phase: 'summary',
+        baseUrl: resolveLocalAiBaseUrl()
+      });
     setStatus(`Summarization failed: ${state.localAi.summaryError}`);
     renderAll();
   } finally {
@@ -1663,30 +2324,59 @@ async function sendChatMessage() {
   renderAll();
 
   let chatFailed = false;
+  const runtimeMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto');
+  const runtimeKind = runtimeMode === LOCAL_AI_RUNTIME_MODES.local
+    ? 'ollama'
+    : state.localAi.browser.ready && state.localAi.browser.runtime
+      ? 'browser'
+      : resolveCurrentLocalAiRuntimeKind();
+  const activeModelName = runtimeKind === 'browser'
+    ? state.localAi.browser.modelName || state.localAi.modelName
+    : state.localAi.modelName;
   try {
     const history = sanitizeLocalAiChatMessages(state.localAi.chat.messages.slice(0, -2));
     const localAiBaseUrl = resolveLocalAiBaseUrl();
-    const result = await chatWithOllama({
-      modelName: state.localAi.modelName,
-      transcriptText,
-      summaryText,
-      history,
-      userMessage,
-      baseUrl: localAiBaseUrl,
-      signal: controller.signal,
-      onChunk: (reply) => {
-        if (controller.signal.aborted || requestId !== state.localAi.chat.requestId) {
-          return;
-        }
+    const result = runtimeKind === 'browser'
+      ? await state.localAi.browser.runtime.chat({
+        transcriptText,
+        summaryText,
+        history,
+        userMessage,
+        signal: controller.signal,
+        onChunk: (reply) => {
+          if (controller.signal.aborted || requestId !== state.localAi.chat.requestId) {
+            return;
+          }
 
-        const lastMessage = state.localAi.chat.messages[state.localAi.chat.messages.length - 1];
-        if (lastMessage) {
-          lastMessage.content = reply;
-          lastMessage.pending = true;
+          const lastMessage = state.localAi.chat.messages[state.localAi.chat.messages.length - 1];
+          if (lastMessage) {
+            lastMessage.content = reply;
+            lastMessage.pending = true;
+          }
+          renderAll();
         }
-        renderAll();
-      }
-    });
+      })
+      : await chatWithOllama({
+        modelName: state.localAi.modelName,
+        transcriptText,
+        summaryText,
+        history,
+        userMessage,
+        baseUrl: localAiBaseUrl,
+        signal: controller.signal,
+        onChunk: (reply) => {
+          if (controller.signal.aborted || requestId !== state.localAi.chat.requestId) {
+            return;
+          }
+
+          const lastMessage = state.localAi.chat.messages[state.localAi.chat.messages.length - 1];
+          if (lastMessage) {
+            lastMessage.content = reply;
+            lastMessage.pending = true;
+          }
+          renderAll();
+        }
+      });
 
     if (controller.signal.aborted || requestId !== state.localAi.chat.requestId) {
       return;
@@ -1701,7 +2391,9 @@ async function sendChatMessage() {
     state.localAi.chat.sending = false;
     state.localAi.chat.status = 'ready';
     state.localAi.chat.message = 'Conversation ready.';
-    state.localAi.chat.detail = `Reply generated with ${state.localAi.modelName}.`;
+    state.localAi.chat.detail = runtimeKind === 'browser'
+      ? `Reply generated with ${activeModelName} in the browser runtime.`
+      : `Reply generated with ${state.localAi.modelName}.`;
     state.localAi.chat.error = '';
     state.localAi.activeController = null;
     setStatus('Chat reply ready.');
@@ -1712,10 +2404,15 @@ async function sendChatMessage() {
       return;
     }
 
-    const detail = describeLocalAiError(error, {
-      phase: 'chat',
-      baseUrl: resolveLocalAiBaseUrl()
-    });
+    const detail = runtimeKind === 'browser'
+      ? describeBrowserAiError(error, {
+        phase: 'chat',
+        modelName: activeModelName
+      })
+      : describeLocalAiError(error, {
+        phase: 'chat',
+        baseUrl: resolveLocalAiBaseUrl()
+      });
     const lastMessage = state.localAi.chat.messages[state.localAi.chat.messages.length - 1];
     if (lastMessage) {
       lastMessage.content = detail;
@@ -2301,8 +2998,17 @@ function buildSettingsSnapshot() {
       : refs.summaryDetailDetailed.checked
         ? 'detailed'
         : 'standard',
+    localAiRuntimeMode: normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto'),
     localAiModelName: state.localAi.modelName || '',
     localAiLastSuccessfulCheckAt: state.localAi.lastSuccessfulCheckAt || '',
+    localAiBrowserModelId: state.settings.localAiBrowserModelId || state.localAi.browser.modelId || '',
+    localAiBrowserModelName: state.settings.localAiBrowserModelName || state.localAi.browser.modelName || '',
+    localAiBrowserModelRepo: state.settings.localAiBrowserModelRepo || state.localAi.browser.modelRepo || '',
+    localAiBrowserModelFile: state.settings.localAiBrowserModelFile || state.localAi.browser.modelFile || '',
+    localAiBrowserModelQuantization: state.settings.localAiBrowserModelQuantization || state.localAi.browser.modelQuantization || '',
+    localAiBrowserModelSizeLabel: state.settings.localAiBrowserModelSizeLabel || state.localAi.browser.modelSizeLabel || '',
+    localAiBrowserModelApproxBytes: state.settings.localAiBrowserModelApproxBytes || state.localAi.browser.modelApproxBytes || 0,
+    localAiBrowserModelNote: state.settings.localAiBrowserModelNote || state.localAi.browser.modelNote || '',
     localAiSummaryText: state.localAi.summaryText || '',
     localAiSummaryWarning: state.localAi.summaryWarning || '',
     localAiSummarySourceChars: state.localAi.summarySourceChars || 0,
@@ -2387,6 +3093,7 @@ function buildSessionFallbackManifest(snapshot = buildPersistedSessionSnapshot()
 }
 
 function loadSettings() {
+  const injected = globalThis.__TRANSCRIBE_CONFIG__ ?? {};
   const defaults = {
     modelKey: 'tiny-en',
     task: 'transcribe',
@@ -2397,8 +3104,17 @@ function loadSettings() {
     speakerNames: ['Speaker 1', 'Speaker 2'],
     serverCopy: false,
     summaryDetail: 'standard',
+    localAiRuntimeMode: normalizeLocalAiRuntimeMode(injected.localAiRuntimeMode || LOCAL_AI_RUNTIME_MODES.auto),
     localAiModelName: '',
     localAiLastSuccessfulCheckAt: '',
+    localAiBrowserModelId: '',
+    localAiBrowserModelName: '',
+    localAiBrowserModelRepo: '',
+    localAiBrowserModelFile: '',
+    localAiBrowserModelQuantization: '',
+    localAiBrowserModelSizeLabel: '',
+    localAiBrowserModelApproxBytes: 0,
+    localAiBrowserModelNote: '',
     localAiSummaryText: '',
     localAiSummaryWarning: '',
     localAiSummarySourceChars: 0,
@@ -2426,8 +3142,17 @@ function loadSettings() {
       ...defaults,
       ...parsed,
       summaryDetail: normalizeLocalAiDetailLevel(parsed?.summaryDetail || defaults.summaryDetail),
+      localAiRuntimeMode: normalizeLocalAiRuntimeMode(parsed?.localAiRuntimeMode || defaults.localAiRuntimeMode),
       localAiModelName: String(parsed?.localAiModelName || ''),
       localAiLastSuccessfulCheckAt: String(parsed?.localAiLastSuccessfulCheckAt || ''),
+      localAiBrowserModelId: String(parsed?.localAiBrowserModelId || ''),
+      localAiBrowserModelName: String(parsed?.localAiBrowserModelName || ''),
+      localAiBrowserModelRepo: String(parsed?.localAiBrowserModelRepo || ''),
+      localAiBrowserModelFile: String(parsed?.localAiBrowserModelFile || ''),
+      localAiBrowserModelQuantization: String(parsed?.localAiBrowserModelQuantization || ''),
+      localAiBrowserModelSizeLabel: String(parsed?.localAiBrowserModelSizeLabel || ''),
+      localAiBrowserModelApproxBytes: Number(parsed?.localAiBrowserModelApproxBytes || 0) || 0,
+      localAiBrowserModelNote: String(parsed?.localAiBrowserModelNote || ''),
       localAiSummaryText: String(parsed?.localAiSummaryText || ''),
       localAiSummaryWarning: String(parsed?.localAiSummaryWarning || ''),
       localAiSummarySourceChars: Number(parsed?.localAiSummarySourceChars || 0) || 0,
@@ -2451,9 +3176,18 @@ function loadSettings() {
 }
 
 function applySettingsSnapshot() {
+  state.localAi.runtimeMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || 'auto');
   state.localAi.modelName = state.settings.localAiModelName || '';
   state.localAi.cachedModelName = state.settings.localAiModelName || '';
   state.localAi.lastSuccessfulCheckAt = state.settings.localAiLastSuccessfulCheckAt || '';
+  state.localAi.browser.modelId = state.settings.localAiBrowserModelId || '';
+  state.localAi.browser.modelName = state.settings.localAiBrowserModelName || '';
+  state.localAi.browser.modelRepo = state.settings.localAiBrowserModelRepo || '';
+  state.localAi.browser.modelFile = state.settings.localAiBrowserModelFile || '';
+  state.localAi.browser.modelQuantization = state.settings.localAiBrowserModelQuantization || '';
+  state.localAi.browser.modelSizeLabel = state.settings.localAiBrowserModelSizeLabel || '';
+  state.localAi.browser.modelApproxBytes = Number(state.settings.localAiBrowserModelApproxBytes || 0) || 0;
+  state.localAi.browser.modelNote = state.settings.localAiBrowserModelNote || '';
   state.localAi.summaryText = state.settings.localAiSummaryText || '';
   state.localAi.summaryWarning = state.settings.localAiSummaryWarning || '';
   state.localAi.summarySourceChars = Number(state.settings.localAiSummarySourceChars || 0) || 0;
@@ -2834,7 +3568,8 @@ function readConfig() {
     clientLimitBytes,
     storageEnabled: Boolean(injected.storageEnabled ?? true),
     localAiAutoDownload: Boolean(injected.localAiAutoDownload ?? true),
-    localAiBaseUrl: String(injected.localAiBaseUrl || '')
+    localAiRuntimeMode: normalizeLocalAiRuntimeMode(injected.localAiRuntimeMode || LOCAL_AI_RUNTIME_MODES.auto),
+    localAiBaseUrl: String(injected.localAiBaseUrl || LOCAL_AI_PROXY_BASE_URL)
   };
 }
 
@@ -2845,7 +3580,7 @@ function resolveLocalAiBaseUrl() {
   }
 
   const configured = String(state.config.localAiBaseUrl || '').trim().replace(/\/+$/, '');
-  return configured || OLLAMA_DEFAULT_BASE_URL;
+  return configured || LOCAL_AI_PROXY_BASE_URL;
 }
 
 function parseInteger(value, fallback) {

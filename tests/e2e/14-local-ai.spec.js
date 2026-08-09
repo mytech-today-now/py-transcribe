@@ -9,6 +9,63 @@ import {
 } from './helpers.js';
 
 test.describe('Local AI summary flows', () => {
+  test('integration: falls back to the browser WASM model when Ollama is unavailable, then summarizes and chats locally', async ({ page }) => {
+    await openApp(page);
+
+    await expect(page.locator('#aiRuntimeSelect')).toHaveValue('auto');
+    await expect(page.locator('#aiRuntimeMeta')).toContainText(/auto mode checks local ollama first/i);
+    await expect(page.locator('#aiState')).toContainText(/browser model ready/i);
+    await expect(page.locator('#checkAiButton')).toHaveText(/refresh browser model/i);
+
+    await selectFilesViaButton(page, [createAudioFile({ name: 'browser-fallback.wav' })]);
+    await loadRuntime(page);
+    await transcribeCurrentFile(page);
+
+    await expect(page.locator('#summarizeButton')).toBeEnabled();
+    await page.locator('#summaryDetailDetailed').check();
+    await page.locator('#summarizeButton').click();
+
+    await expect(page.locator('#summaryPanel')).toBeVisible();
+    await expect(page.locator('#summaryPanelTitle')).toHaveText('Local AI summary');
+    await expect(page.locator('#summaryContent')).toContainText('Browser summary.');
+    await expect(page.locator('#summaryContent')).toContainText('Action item.');
+    await expect(page.locator('#summaryMeta')).toContainText('Kimi/Opus Distill 2B');
+
+    await page.locator('#chatInput').fill('What action items were mentioned?');
+    await page.locator('#chatSendButton').click();
+
+    await expect(page.locator('#chatHistory')).toContainText('Browser reply.');
+    await expect(page.locator('#chatStatus')).toContainText(/conversation ready/i);
+
+    const browserState = await page.evaluate(() => window.__pyTranscribeTestState.browserAi);
+    expect(browserState.loadCalls).toBeGreaterThan(0);
+    expect(browserState.summarizeCalls).toBe(1);
+    expect(browserState.chatCalls).toBe(1);
+  });
+
+  test('regression: persists the selected runtime mode across reloads', async ({ page }) => {
+    await openApp(page);
+
+    await expect(page.locator('#aiRuntimeSelect')).toHaveValue('auto');
+
+    await page.locator('#aiRuntimeSelect').selectOption('browser');
+    await expect(page.locator('#aiRuntimeMeta')).toContainText(/browser-only mode/i);
+    await expect(page.locator('#aiState')).toContainText(/browser model ready/i);
+
+    await page.reload();
+    await expect(page.locator('#aiRuntimeSelect')).toHaveValue('browser');
+    await expect(page.locator('#aiRuntimeMeta')).toContainText(/browser-only mode/i);
+    await expect(page.locator('#aiState')).toContainText(/browser model ready/i);
+
+    await page.locator('#aiRuntimeSelect').selectOption('local');
+    await expect(page.locator('#aiRuntimeMeta')).toContainText(/local-only mode/i);
+
+    await page.reload();
+    await expect(page.locator('#aiRuntimeSelect')).toHaveValue('local');
+    await expect(page.locator('#aiRuntimeMeta')).toContainText(/local-only mode/i);
+    await expect(page.locator('#aiState')).toContainText(/local ai unavailable|ollama/i);
+  });
+
   test('integration: auto-downloads the latest Kimi model on desktop and chats against the transcript', async ({ page }) => {
     const requests = await installLocalAiRoutes(page, {
       models: [],
@@ -65,6 +122,7 @@ test.describe('Local AI summary flows', () => {
     await openApp(page);
     await expect(page.locator('#aiState')).toContainText(/model ready/i);
     await expect(page.locator('#aiModelMeta')).toContainText(/installed model/i);
+    await expect(page.locator('#aiRuntimeMeta')).toContainText(/auto mode checks local ollama first/i);
     expect(requests.tags).toHaveLength(1);
     expect(requests.tags[0].kind).toBe('direct');
     expect(requests.tags[0].url).toContain('/api/tags');
@@ -147,7 +205,12 @@ test.describe('Local AI summary flows', () => {
       pullDelayMs: 250
     });
 
-    await openApp(page, { localAiAutoDownload: false });
+    await openApp(page, {
+      localAiAutoDownload: false,
+      initialSettings: {
+        localAiRuntimeMode: 'local'
+      }
+    });
     await expect(page.locator('#aiModelMeta')).toContainText(/kimi-k3:cloud is not installed yet/i);
 
     await page.locator('#aiModelSelect').selectOption('rubenftenorio/kimi-k25-local');

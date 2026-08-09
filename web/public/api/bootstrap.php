@@ -295,6 +295,7 @@ function app_build_config(array $extra = []): array
         'uploadEndpoint' => 'api/upload.php',
         'downloadEndpoint' => 'api/download.php',
         'localAiBaseUrl' => 'api/ollama',
+        'localAiRuntimeMode' => 'auto',
         'promoUrl' => 'https://mytech.today',
         'readmeApiUrl' => 'https://api.github.com/repos/mytech-today-now/py-transcribe/readme?ref=main',
         'readmeSourceUrl' => 'https://github.com/mytech-today-now/py-transcribe/blob/main/readme.md',
@@ -348,25 +349,136 @@ function app_proxy_ollama_endpoint(string $endpoint): void
     }
     @ob_implicit_flush(true);
 
-    $target = 'http://localhost:11434/api/' . $endpoint;
-    $stream = @fopen($target, 'rb', false, $context);
+    foreach (app_ollama_target_candidates() as $baseUrl) {
+        $candidateTarget = rtrim($baseUrl, '/') . '/api/' . $endpoint;
+        if (app_proxy_ollama_endpoint_via_curl($candidateTarget, $method, $requestHeaders, $body, $endpoint)) {
+            return;
+        }
+
+        if (app_proxy_ollama_endpoint_via_stream($candidateTarget, $context, $endpoint)) {
+            return;
+        }
+    }
+
+    app_text(
+        'Ollama is not running on this machine or the local proxy cannot reach http://127.0.0.1:11434 or http://localhost:11434.',
+        502
+    );
+}
+
+function app_proxy_ollama_endpoint_via_curl(string $candidateTarget, string $method, array $requestHeaders, string $body, string $endpoint): bool
+{
+    if (!function_exists('curl_init')) {
+        return false;
+    }
+
+    $curl = curl_init($candidateTarget);
+    if ($curl === false) {
+        return false;
+    }
+
+    $responseStatus = 502;
+    $responseContentType = '';
+    $responseHeadersSent = false;
+    $responseStarted = false;
+
+    $emitResponseHeaders = static function () use (&$responseHeadersSent, &$responseStatus, &$responseContentType, $endpoint): void {
+        if ($responseHeadersSent) {
+            return;
+        }
+
+        app_emit_ollama_proxy_headers($responseStatus, $responseContentType, $endpoint);
+        $responseHeadersSent = true;
+    };
+
+    curl_setopt_array($curl, [
+        CURLOPT_CUSTOMREQUEST => $method,
+        CURLOPT_HTTPHEADER => array_merge($requestHeaders, ['Expect:']),
+        CURLOPT_HEADERFUNCTION => static function ($curlHandle, string $headerLine) use (&$responseStatus, &$responseContentType, $emitResponseHeaders): int {
+            $headerLength = strlen($headerLine);
+            $trimmed = trim($headerLine);
+
+            if ($trimmed === '') {
+                $emitResponseHeaders();
+                return $headerLength;
+            }
+
+            if (preg_match('/^HTTP\/\S+\s+(\d{3})\b/i', $headerLine, $matches)) {
+                $responseStatus = (int) $matches[1];
+                $responseContentType = '';
+                return $headerLength;
+            }
+
+            if (stripos($trimmed, 'Content-Type:') === 0) {
+                $responseContentType = trim(substr($trimmed, strlen('Content-Type:')));
+            }
+
+            return $headerLength;
+        },
+        CURLOPT_WRITEFUNCTION => static function ($curlHandle, string $chunk) use (&$responseHeadersSent, &$responseStarted, &$responseStatus, &$responseContentType, $emitResponseHeaders): int {
+            if (!$responseHeadersSent) {
+                $emitResponseHeaders();
+            }
+
+            $responseStarted = true;
+            echo $chunk;
+            flush();
+
+            return strlen($chunk);
+        },
+        CURLOPT_FAILONERROR => false,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+        CURLOPT_RETURNTRANSFER => false,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_TIMEOUT => 3600,
+        CURLOPT_VERBOSE => false,
+    ]);
+
+    if ($method === 'POST') {
+        curl_setopt($curl, CURLOPT_POSTFIELDS, $body);
+    }
+
+    $result = curl_exec($curl);
+    $curlError = curl_error($curl);
+    $responseCode = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+    if ($responseCode > 0) {
+        $responseStatus = $responseCode;
+    }
+
+    if (!$responseHeadersSent) {
+        if ($result === false && !$responseStarted) {
+            curl_close($curl);
+            return false;
+        }
+
+        $emitResponseHeaders();
+    }
+
+    curl_close($curl);
+
+    if ($result === false && !$responseStarted && !$responseHeadersSent) {
+        return false;
+    }
+
+    if ($result === false && $curlError !== '') {
+        error_log('Ollama curl proxy warning: ' . $curlError);
+    }
+
+    return true;
+}
+
+function app_proxy_ollama_endpoint_via_stream(string $candidateTarget, $context, string $endpoint): bool
+{
+    $stream = @fopen($candidateTarget, 'rb', false, $context);
     if ($stream === false) {
-        app_text('Ollama is not running on this machine or the local proxy cannot reach http://localhost:11434.', 502);
+        return false;
     }
 
     $responseHeaders = $http_response_header ?? [];
     $status = app_parse_http_status_code($responseHeaders) ?? 502;
     $contentType = app_http_header_value($responseHeaders, 'Content-Type');
-    if ($contentType === null || $contentType === '') {
-        $contentType = $endpoint === 'tags'
-            ? 'application/json; charset=utf-8'
-            : 'application/x-ndjson; charset=utf-8';
-    }
-
-    http_response_code($status);
-    header('Cache-Control: no-store');
-    header('X-Accel-Buffering: no');
-    header('Content-Type: ' . $contentType);
+    app_emit_ollama_proxy_headers($status, $contentType, $endpoint);
 
     while (!feof($stream)) {
         $chunk = fread($stream, 8192);
@@ -383,7 +495,40 @@ function app_proxy_ollama_endpoint(string $endpoint): void
     }
 
     fclose($stream);
-    exit;
+    return true;
+}
+
+function app_emit_ollama_proxy_headers(int $status, ?string $contentType, string $endpoint): void
+{
+    http_response_code($status);
+    header('Cache-Control: no-store');
+    header('X-Accel-Buffering: no');
+    header('Content-Type: ' . app_ollama_proxy_content_type($contentType, $endpoint));
+}
+
+function app_ollama_proxy_content_type(?string $contentType, string $endpoint): string
+{
+    $defaultContentType = $endpoint === 'tags'
+        ? 'application/json; charset=utf-8'
+        : 'application/x-ndjson; charset=utf-8';
+
+    $normalized = trim((string) $contentType);
+    return $normalized !== '' ? $normalized : $defaultContentType;
+}
+
+function app_ollama_target_candidates(): array
+{
+    $candidates = [];
+    $configured = trim((string) getenv('OLLAMA_BASE_URL'));
+    if ($configured !== '' && preg_match('/^[a-z][a-z\d+.-]*:\/\//i', $configured) === 1) {
+        $candidates[] = rtrim($configured, '/');
+    }
+
+    $candidates[] = 'http://127.0.0.1:11434';
+    $candidates[] = 'http://localhost:11434';
+    $candidates[] = 'http://[::1]:11434';
+
+    return array_values(array_unique(array_filter($candidates)));
 }
 
 function app_parse_http_status_code(array $headers): ?int

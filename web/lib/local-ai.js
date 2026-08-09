@@ -70,17 +70,28 @@ export function normalizeOllamaBaseUrl(baseUrl) {
   return String(baseUrl || '').trim().replace(/\/+$/, '');
 }
 
+function shouldIncludeSameOriginFallbacks() {
+  if (typeof location === 'undefined') {
+    return true;
+  }
+
+  const protocol = String(location.protocol || '').toLowerCase();
+  if (protocol === 'file:') {
+    return true;
+  }
+
+  const hostname = String(location.hostname || '').toLowerCase();
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+}
+
 export function resolveOllamaBaseUrlCandidates(baseUrl = OLLAMA_DEFAULT_BASE_URL) {
   const normalizedBaseUrl = normalizeOllamaBaseUrl(baseUrl);
   const candidates = [];
 
-  if (normalizedBaseUrl && isAbsoluteOllamaUrl(normalizedBaseUrl) && !isLoopbackOllamaUrl(normalizedBaseUrl)) {
-    candidates.push(normalizedBaseUrl);
-  }
-
   candidates.push(OLLAMA_DEFAULT_BASE_URL, OLLAMA_LOCALHOST_BASE_URL);
 
-  if (normalizedBaseUrl && (!isAbsoluteOllamaUrl(normalizedBaseUrl) || isLoopbackOllamaUrl(normalizedBaseUrl))) {
+  const isAbsoluteBaseUrl = /^[a-z][a-z\d+.-]*:\/\//i.test(normalizedBaseUrl);
+  if (normalizedBaseUrl && (isAbsoluteBaseUrl || shouldIncludeSameOriginFallbacks())) {
     candidates.push(normalizedBaseUrl);
   }
 
@@ -222,10 +233,10 @@ export function prepareTranscriptForSummary(transcriptText, { maxChars = LOCAL_A
   };
 }
 
-export function buildSummaryPrompt(transcriptText, detailLevel) {
+export function buildSummaryPrompt(transcriptText, detailLevel, { maxChars = LOCAL_AI_MAX_TRANSCRIPT_CHARS } = {}) {
   const levelKey = normalizeLocalAiDetailLevel(detailLevel);
   const detail = LOCAL_AI_DETAIL_LEVELS[levelKey];
-  const preparedTranscript = prepareTranscriptForSummary(transcriptText);
+  const preparedTranscript = prepareTranscriptForSummary(transcriptText, { maxChars });
 
   // Map the user's chosen detail level to an explicit instruction so Ollama gets one unambiguous request.
   const systemPrompt = [
@@ -607,7 +618,7 @@ export function describeLocalAiError(error, { phase = 'connect', baseUrl = OLLAM
   }
 
   if (lowered.includes('cors') || lowered.includes('origin')) {
-    return `The browser blocked access to Ollama at ${baseUrl}. If Ollama is already running, allow this app in OLLAMA_ORIGINS or serve the app from a local origin, then click Retry.`;
+    return `The browser blocked access to Ollama at ${baseUrl}. If Ollama is already running, allow this app in OLLAMA_ORIGINS or open the local PHP build so its Ollama bridge can reach the daemon, then click Retry.`;
   }
 
   if (phase === 'summary') {
@@ -825,23 +836,6 @@ function normalizeSummaryText(value) {
   return String(value || '')
     .replace(/\r\n/g, '\n')
     .trim();
-}
-
-function isAbsoluteOllamaUrl(value) {
-  return /^[a-z][a-z\d+.-]*:\/\//i.test(String(value || '').trim());
-}
-
-function isLoopbackOllamaUrl(value) {
-  if (!isAbsoluteOllamaUrl(value)) {
-    return false;
-  }
-
-  try {
-    const hostname = new URL(String(value)).hostname.toLowerCase();
-    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
-  } catch {
-    return false;
-  }
 }
 
 function uniqueOllamaBaseUrls(values) {
