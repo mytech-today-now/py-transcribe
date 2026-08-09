@@ -7,6 +7,7 @@ import {
 export const AI_POWERED_DEFAULT_BASE_URL = 'http://127.0.0.1:3001';
 export const AI_POWERED_LOCALHOST_BASE_URL = 'http://localhost:3001';
 export const AI_POWERED_IPV6_LOOPBACK_BASE_URL = 'http://[::1]:3001';
+export const AI_POWERED_PROXY_BASE_URL = 'api/ai-powered';
 const AI_POWERED_MAX_CHAT_HISTORY_MESSAGES = 12;
 
 export const AI_POWERED_STATUS_MESSAGES = Object.freeze({
@@ -30,35 +31,47 @@ export function normalizeAiPoweredBaseUrl(baseUrl) {
   return String(baseUrl || '').trim().replace(/\/+$/, '');
 }
 
-export function resolveAiPoweredBaseUrlCandidates(baseUrl = AI_POWERED_DEFAULT_BASE_URL) {
+export function resolveAiPoweredBaseUrlCandidates(baseUrl = AI_POWERED_PROXY_BASE_URL) {
   const normalizedBaseUrl = normalizeAiPoweredBaseUrl(baseUrl);
   const isAbsoluteBaseUrl = /^[a-z][a-z\d+.-]*:\/\//i.test(normalizedBaseUrl);
   const candidates = [];
+  const isLoopbackBaseUrl = normalizedBaseUrl === AI_POWERED_DEFAULT_BASE_URL
+    || normalizedBaseUrl === AI_POWERED_LOCALHOST_BASE_URL
+    || normalizedBaseUrl === AI_POWERED_IPV6_LOOPBACK_BASE_URL;
 
-  if (normalizedBaseUrl && isAbsoluteBaseUrl) {
+  if (normalizedBaseUrl && !isAbsoluteBaseUrl) {
     candidates.push(normalizedBaseUrl);
   }
 
+  if (normalizedBaseUrl && isAbsoluteBaseUrl && !isLoopbackBaseUrl) {
+    candidates.push(normalizedBaseUrl);
+  }
+
+  candidates.push(AI_POWERED_PROXY_BASE_URL);
   candidates.push(AI_POWERED_DEFAULT_BASE_URL);
   candidates.push(AI_POWERED_LOCALHOST_BASE_URL);
   candidates.push(AI_POWERED_IPV6_LOOPBACK_BASE_URL);
 
-  if (normalizedBaseUrl && !isAbsoluteBaseUrl) {
+  if (normalizedBaseUrl && isAbsoluteBaseUrl && isLoopbackBaseUrl) {
     candidates.push(normalizedBaseUrl);
   }
 
   return uniqueBaseUrls(candidates);
 }
 
-export function buildAiPoweredApiUrl(baseUrl = AI_POWERED_DEFAULT_BASE_URL, endpoint) {
-  const normalizedBaseUrl = normalizeAiPoweredBaseUrl(baseUrl) || AI_POWERED_DEFAULT_BASE_URL;
+export function buildAiPoweredApiUrl(baseUrl = AI_POWERED_PROXY_BASE_URL, endpoint) {
+  const normalizedBaseUrl = normalizeAiPoweredBaseUrl(baseUrl) || AI_POWERED_PROXY_BASE_URL;
   const normalizedEndpoint = String(endpoint || '').trim().replace(/^\/+/, '');
 
   if (!normalizedEndpoint) {
     throw new Error('No AI-Powered endpoint was provided.');
   }
 
-  return `${normalizedBaseUrl}/${normalizedEndpoint}`;
+  if (/^[a-z][a-z\d+.-]*:\/\//i.test(normalizedBaseUrl)) {
+    return `${normalizedBaseUrl}/api/${normalizedEndpoint}`;
+  }
+
+  return `${normalizedBaseUrl}/${normalizedEndpoint}.php`;
 }
 
 export function normalizeAiPoweredModel(model) {
@@ -161,7 +174,7 @@ export function resolvePreferredAiPoweredModel(models, {
 }
 
 export async function fetchAiPoweredHealth({
-  baseUrl = AI_POWERED_DEFAULT_BASE_URL,
+  baseUrl = AI_POWERED_PROXY_BASE_URL,
   signal,
   fetchImpl = fetch
 } = {}) {
@@ -185,17 +198,17 @@ export async function fetchAiPoweredHealth({
 }
 
 export async function fetchAiPoweredModels({
-  baseUrl = AI_POWERED_DEFAULT_BASE_URL,
+  baseUrl = AI_POWERED_PROXY_BASE_URL,
   modality = 'text',
   signal,
   fetchImpl = fetch
 } = {}) {
-  const url = new URL(buildAiPoweredApiUrl(baseUrl, 'models'));
-  if (modality) {
-    url.searchParams.set('modality', modality);
-  }
+  const url = buildAiPoweredApiUrl(baseUrl, 'models');
+  const requestUrl = modality
+    ? `${url}${String(url).includes('?') ? '&' : '?'}modality=${encodeURIComponent(modality)}`
+    : url;
 
-  const response = await fetchImpl(url.toString(), {
+  const response = await fetchImpl(requestUrl, {
     method: 'GET',
     cache: 'no-store',
     signal
@@ -217,7 +230,7 @@ export async function fetchAiPoweredModels({
 }
 
 export async function fetchAiPoweredModelsFromCandidates({
-  baseUrls = [AI_POWERED_DEFAULT_BASE_URL, AI_POWERED_LOCALHOST_BASE_URL, AI_POWERED_IPV6_LOOPBACK_BASE_URL],
+  baseUrls = [AI_POWERED_PROXY_BASE_URL, AI_POWERED_DEFAULT_BASE_URL, AI_POWERED_LOCALHOST_BASE_URL, AI_POWERED_IPV6_LOOPBACK_BASE_URL],
   modality = 'text',
   signal,
   fetchImpl = fetch
@@ -264,7 +277,7 @@ export async function summarizeWithAiPowered({
   modelId,
   transcriptText,
   detailLevel,
-  baseUrl = AI_POWERED_DEFAULT_BASE_URL,
+  baseUrl = AI_POWERED_PROXY_BASE_URL,
   signal,
   fetchImpl = fetch,
   onChunk
@@ -331,7 +344,7 @@ export async function chatWithAiPowered({
   summaryText,
   history = [],
   userMessage,
-  baseUrl = AI_POWERED_DEFAULT_BASE_URL,
+  baseUrl = AI_POWERED_PROXY_BASE_URL,
   signal,
   fetchImpl = fetch,
   onChunk

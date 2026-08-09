@@ -109,10 +109,14 @@
       </article>
 
       <footer class="footer card">
-        <div class="footer-row">
-          <p id="status" role="status" aria-live="polite">Ready. Load Whisper / Python, then choose a file.</p>
-          <p class="fine-print">Local model inference runs in the browser. PHP only stores optional backups and serves the shell.</p>
-        </div>
+        <details id="eventLog" class="event-log" open>
+          <summary class="event-log-summary">
+            <span class="event-log-title">Event log</span>
+            <strong id="status" role="status" aria-live="polite">Ready. Load Whisper / Python, then choose a file.</strong>
+          </summary>
+          <ol id="eventLogList" class="event-log-list" aria-live="polite" aria-relevant="additions text"></ol>
+        </details>
+        <p class="fine-print">Local model inference runs in the browser. PHP only stores optional backups and serves the shell.</p>
       </footer>
 
       <div class="sr-only" aria-hidden="true">
@@ -249,13 +253,14 @@
               <select id="aiRuntimeSelect">
                 <option value="auto">Auto - Ollama first, browser fallback</option>
                 <option value="local">Local only - Ollama</option>
+                <option value="ai-powered">AI-Powered providers</option>
                 <option value="browser">Browser only - WASM cache</option>
               </select>
               <p id="aiRuntimeMeta" class="hint">Auto mode checks local Ollama first, then falls back to the browser runtime if needed.</p>
             </div>
 
             <div class="field local-ai-model-field">
-              <label for="aiModelSelect">Local AI model</label>
+              <label id="aiModelLabel" for="aiModelSelect">Local AI model</label>
               <select id="aiModelSelect"></select>
               <p id="aiModelMeta" class="hint">Choose an installed model or download the latest Kimi variant.</p>
             </div>

@@ -295,6 +295,7 @@ function app_build_config(array $extra = []): array
         'uploadEndpoint' => 'api/upload.php',
         'downloadEndpoint' => 'api/download.php',
         'localAiBaseUrl' => 'api/ollama',
+        'aiPoweredBaseUrl' => 'api/ai-powered',
         'localAiRuntimeMode' => 'auto',
         'promoUrl' => 'https://mytech.today',
         'readmeApiUrl' => 'https://api.github.com/repos/mytech-today-now/py-transcribe/readme?ref=main',
@@ -527,6 +528,233 @@ function app_ollama_target_candidates(): array
     $candidates[] = 'http://127.0.0.1:11434';
     $candidates[] = 'http://localhost:11434';
     $candidates[] = 'http://[::1]:11434';
+
+    return array_values(array_unique(array_filter($candidates)));
+}
+
+function app_proxy_ai_powered_endpoint(string $endpoint): void
+{
+    $endpoint = trim($endpoint);
+    $allowed = ['health', 'models', 'stream'];
+    if ($endpoint === '' || !in_array($endpoint, $allowed, true)) {
+        app_text('AI-Powered endpoint not found.', 404);
+    }
+
+    $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
+    if ($endpoint === 'stream') {
+        if ($method !== 'POST') {
+            app_text('Method not allowed.', 405);
+        }
+    } elseif ($method !== 'GET') {
+        app_text('Method not allowed.', 405);
+    }
+
+    $body = $method === 'POST' ? (string) file_get_contents('php://input') : '';
+    $requestHeaders = [
+        'Accept: application/json, application/x-ndjson, text/plain;q=0.8, */*;q=0.5'
+    ];
+    if ($method === 'POST') {
+        $requestHeaders[] = 'Content-Type: application/json';
+    }
+
+    $httpOptions = [
+        'method' => $method,
+        'header' => implode("\r\n", $requestHeaders) . "\r\n",
+        'ignore_errors' => true,
+        'timeout' => 3600
+    ];
+    if ($method === 'POST') {
+        $httpOptions['content'] = $body;
+    }
+
+    $context = stream_context_create([
+        'http' => $httpOptions
+    ]);
+
+    @set_time_limit(0);
+    while (ob_get_level() > 0) {
+        @ob_end_flush();
+    }
+    @ob_implicit_flush(true);
+
+    foreach (app_ai_powered_target_candidates() as $baseUrl) {
+        $candidateTarget = rtrim($baseUrl, '/') . '/api/' . $endpoint;
+        if (app_proxy_ai_powered_endpoint_via_curl($candidateTarget, $method, $requestHeaders, $body, $endpoint)) {
+            return;
+        }
+
+        if (app_proxy_ai_powered_endpoint_via_stream($candidateTarget, $context, $endpoint)) {
+            return;
+        }
+    }
+
+    app_text(
+        'AI-Powered is not running on this machine or the local proxy cannot reach http://127.0.0.1:3001 or http://localhost:3001.',
+        502
+    );
+}
+
+function app_proxy_ai_powered_endpoint_via_curl(string $candidateTarget, string $method, array $requestHeaders, string $body, string $endpoint): bool
+{
+    if (!function_exists('curl_init')) {
+        return false;
+    }
+
+    $curl = curl_init($candidateTarget);
+    if ($curl === false) {
+        return false;
+    }
+
+    $responseStatus = 502;
+    $responseContentType = '';
+    $responseHeadersSent = false;
+    $responseStarted = false;
+
+    $emitResponseHeaders = static function () use (&$responseHeadersSent, &$responseStatus, &$responseContentType, $endpoint): void {
+        if ($responseHeadersSent) {
+            return;
+        }
+
+        app_emit_ai_powered_proxy_headers($responseStatus, $responseContentType, $endpoint);
+        $responseHeadersSent = true;
+    };
+
+    curl_setopt_array($curl, [
+        CURLOPT_CUSTOMREQUEST => $method,
+        CURLOPT_HTTPHEADER => array_merge($requestHeaders, ['Expect:']),
+        CURLOPT_HEADERFUNCTION => static function ($curlHandle, string $headerLine) use (&$responseStatus, &$responseContentType, $emitResponseHeaders): int {
+            $headerLength = strlen($headerLine);
+            $trimmed = trim($headerLine);
+
+            if ($trimmed === '') {
+                $emitResponseHeaders();
+                return $headerLength;
+            }
+
+            if (preg_match('/^HTTP\/\S+\s+(\d{3})\b/i', $headerLine, $matches)) {
+                $responseStatus = (int) $matches[1];
+                $responseContentType = '';
+                return $headerLength;
+            }
+
+            if (stripos($trimmed, 'Content-Type:') === 0) {
+                $responseContentType = trim(substr($trimmed, strlen('Content-Type:')));
+            }
+
+            return $headerLength;
+        },
+        CURLOPT_WRITEFUNCTION => static function ($curlHandle, string $chunk) use (&$responseHeadersSent, &$responseStarted, &$responseStatus, &$responseContentType, $emitResponseHeaders): int {
+            if (!$responseHeadersSent) {
+                $emitResponseHeaders();
+            }
+
+            $responseStarted = true;
+            echo $chunk;
+            flush();
+
+            return strlen($chunk);
+        },
+        CURLOPT_FAILONERROR => false,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
+        CURLOPT_RETURNTRANSFER => false,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_TIMEOUT => 3600,
+        CURLOPT_VERBOSE => false,
+    ]);
+
+    if ($method === 'POST') {
+        curl_setopt($curl, CURLOPT_POSTFIELDS, $body);
+    }
+
+    $result = curl_exec($curl);
+    $curlError = curl_error($curl);
+    $responseCode = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+    if ($responseCode > 0) {
+        $responseStatus = $responseCode;
+    }
+
+    if (!$responseHeadersSent) {
+        if ($result === false && !$responseStarted) {
+            curl_close($curl);
+            return false;
+        }
+
+        $emitResponseHeaders();
+    }
+
+    curl_close($curl);
+
+    if ($result === false && !$responseStarted && !$responseHeadersSent) {
+        return false;
+    }
+
+    if ($result === false && $curlError !== '') {
+        error_log('AI-Powered curl proxy warning: ' . $curlError);
+    }
+
+    return true;
+}
+
+function app_proxy_ai_powered_endpoint_via_stream(string $candidateTarget, $context, string $endpoint): bool
+{
+    $stream = @fopen($candidateTarget, 'rb', false, $context);
+    if ($stream === false) {
+        return false;
+    }
+
+    $responseHeaders = $http_response_header ?? [];
+    $status = app_parse_http_status_code($responseHeaders) ?? 502;
+    $contentType = app_http_header_value($responseHeaders, 'Content-Type');
+    app_emit_ai_powered_proxy_headers($status, $contentType, $endpoint);
+
+    while (!feof($stream)) {
+        $chunk = fread($stream, 8192);
+        if ($chunk === false) {
+            break;
+        }
+
+        if ($chunk === '') {
+            continue;
+        }
+
+        echo $chunk;
+        flush();
+    }
+
+    fclose($stream);
+    return true;
+}
+
+function app_emit_ai_powered_proxy_headers(int $status, ?string $contentType, string $endpoint): void
+{
+    http_response_code($status);
+    header('Cache-Control: no-store');
+    header('X-Accel-Buffering: no');
+    header('Content-Type: ' . app_ai_powered_proxy_content_type($contentType, $endpoint));
+}
+
+function app_ai_powered_proxy_content_type(?string $contentType, string $endpoint): string
+{
+    $defaultContentType = in_array($endpoint, ['health', 'models'], true)
+        ? 'application/json; charset=utf-8'
+        : 'text/plain; charset=utf-8';
+
+    $normalized = trim((string) $contentType);
+    return $normalized !== '' ? $normalized : $defaultContentType;
+}
+
+function app_ai_powered_target_candidates(): array
+{
+    $candidates = [];
+    $configured = trim((string) getenv('AI_POWERED_BASE_URL'));
+    if ($configured !== '' && preg_match('/^[a-z][a-z\d+.-]*:\/\//i', $configured) === 1) {
+        $candidates[] = rtrim($configured, '/');
+    }
+
+    $candidates[] = 'http://127.0.0.1:3001';
+    $candidates[] = 'http://localhost:3001';
+    $candidates[] = 'http://[::1]:3001';
 
     return array_values(array_unique(array_filter($candidates)));
 }

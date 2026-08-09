@@ -342,6 +342,167 @@ export async function installLocalAiRoutes(page, {
   return requests;
 }
 
+export async function installAiPoweredRoutes(page, {
+  models = [
+    { id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4', capabilities: ['text', 'structured'] },
+    { id: 'openai/gpt-4.1-mini', name: 'GPT-4.1 Mini', capabilities: ['text'] }
+  ],
+  summaryChunks = [
+    'AI-Powered summary.',
+    '\n- Main idea.',
+    '\n- Action item.'
+  ],
+  chatChunks = [
+    'AI-Powered reply.',
+    '\n- Action item.'
+  ],
+  healthDelayMs = 0,
+  modelsDelayMs = 0,
+  streamDelayMs = 0,
+  healthStatus = 200,
+  modelsStatus = 200,
+  streamStatus = 200
+} = {}) {
+  const requests = {
+    health: [],
+    models: [],
+    stream: []
+  };
+
+  const corsHeaders = {
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'GET,POST,OPTIONS',
+    'access-control-allow-headers': 'content-type',
+    'cache-control': 'no-store'
+  };
+
+  const jsonHeaders = {
+    ...corsHeaders,
+    'content-type': 'application/json; charset=utf-8'
+  };
+
+  const textHeaders = {
+    ...corsHeaders,
+    'content-type': 'text/plain; charset=utf-8'
+  };
+
+  const fulfillPreflight = async (route, headers = corsHeaders) => {
+    await route.fulfill({
+      status: 204,
+      headers,
+      body: ''
+    });
+  };
+
+  const fulfillJson = async (route, payload, headers = jsonHeaders, status = 200) => {
+    await route.fulfill({
+      status,
+      headers,
+      body: JSON.stringify(payload)
+    });
+  };
+
+  const fulfillText = async (route, body, headers = textHeaders, status = 200) => {
+    await route.fulfill({
+      status,
+      headers,
+      body
+    });
+  };
+
+  const buildStreamBody = (chunks) => `${chunks.map((chunk) => `data: ${JSON.stringify({ text: chunk })}`).join('\n')}\n`;
+
+  await page.route(/\/api\/ai-powered\/health\.php(?:\?.*)?$/i, async (route, request) => {
+    requests.health.push({
+      method: request.method(),
+      url: request.url(),
+      kind: 'proxy'
+    });
+
+    if (request.method() === 'OPTIONS') {
+      await fulfillPreflight(route);
+      return;
+    }
+
+    if (healthDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, healthDelayMs));
+    }
+
+    if (healthStatus !== 200) {
+      await fulfillJson(route, {
+        ok: false,
+        error: 'AI-Powered bridge unavailable.'
+      }, jsonHeaders, healthStatus);
+      return;
+    }
+
+    await fulfillJson(route, {
+      status: 'ok',
+      service: 'ai-powered'
+    });
+  });
+
+  await page.route(/\/api\/ai-powered\/models\.php(?:\?.*)?$/i, async (route, request) => {
+    requests.models.push({
+      method: request.method(),
+      url: request.url(),
+      kind: 'proxy'
+    });
+
+    if (request.method() === 'OPTIONS') {
+      await fulfillPreflight(route);
+      return;
+    }
+
+    if (modelsDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, modelsDelayMs));
+    }
+
+    if (modelsStatus !== 200) {
+      await fulfillJson(route, {
+        ok: false,
+        error: 'AI-Powered bridge unavailable.'
+      }, jsonHeaders, modelsStatus);
+      return;
+    }
+
+    await fulfillJson(route, models);
+  });
+
+  await page.route(/\/api\/ai-powered\/stream\.php(?:\?.*)?$/i, async (route, request) => {
+    const payload = request.postDataJSON?.() ?? null;
+    const prompt = String(payload?.prompt || '');
+    const phase = /recent conversation:|transcript summary:/i.test(prompt) || requests.stream.length > 0
+      ? 'chat'
+      : 'summary';
+    requests.stream.push({
+      method: request.method(),
+      url: request.url(),
+      kind: 'proxy',
+      phase,
+      postData: payload
+    });
+
+    if (request.method() === 'OPTIONS') {
+      await fulfillPreflight(route);
+      return;
+    }
+
+    if (streamDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, streamDelayMs));
+    }
+
+    if (streamStatus !== 200) {
+      await fulfillText(route, 'AI-Powered stream unavailable.', textHeaders, streamStatus);
+      return;
+    }
+
+    await fulfillText(route, buildStreamBody(phase === 'chat' ? chatChunks : summaryChunks));
+  });
+
+  return requests;
+}
+
 export async function installAppHarness(page, options = {}) {
   const {
     initialSettings,
@@ -1094,6 +1255,7 @@ export async function loadRuntime(page) {
 
 export async function transcribeCurrentFile(page) {
   await page.getByRole('button', { name: 'Transcribe' }).click();
+  await expect(page.locator('#transcriptEditor')).not.toHaveValue('', { timeout: 120_000 });
 }
 
 export async function recordMicrophoneClip(page, { holdForMs = 1100 } = {}) {

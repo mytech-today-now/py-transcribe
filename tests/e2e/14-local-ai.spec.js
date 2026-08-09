@@ -1,6 +1,7 @@
 import { test, expect } from './fixtures.js';
 import {
   createAudioFile,
+  installAiPoweredRoutes,
   installLocalAiRoutes,
   loadRuntime,
   openApp,
@@ -9,7 +10,103 @@ import {
 } from './helpers.js';
 
 test.describe('Local AI summary flows', () => {
-  test('integration: falls back to browser WASM when Ollama is CORS-blocked, then summarizes and chats locally', async ({ page }) => {
+  test('integration: uses the same-origin Ollama bridge before loopback candidates, then summarizes and chats locally', async ({ page }) => {
+    const requests = await installLocalAiRoutes(page, {
+      models: [
+        {
+          name: 'rubenftenorio/kimi-k25-local',
+          details: { family: 'Kimi', parameter_size: '2.5B' }
+        }
+      ],
+      directCors: false
+    });
+
+    await openApp(page);
+
+    await expect(page.locator('#aiRuntimeSelect')).toHaveValue('auto');
+    await expect(page.locator('#aiRuntimeMeta')).toContainText(/auto mode checks local ollama first/i);
+    await expect(page.locator('#aiRuntimeMeta')).toContainText(/ollama endpoint: same-origin php bridge/i);
+    await expect(page.locator('#aiState')).toContainText(/model ready/i);
+    await expect(page.locator('#checkAiButton')).toHaveText(/refresh local ai/i);
+    expect(requests.tags).toHaveLength(1);
+    expect(requests.tags[0].kind).toBe('proxy');
+    expect(requests.tags[0].url).toContain('/api/ollama/tags.php');
+
+    await selectFilesViaButton(page, [createAudioFile({ name: 'browser-fallback.wav' })]);
+    await loadRuntime(page);
+    await transcribeCurrentFile(page);
+
+    await expect(page.locator('#summarizeButton')).toBeEnabled();
+    await page.locator('#summaryDetailDetailed').check();
+    await page.locator('#summarizeButton').click();
+
+    await expect(page.locator('#summaryPanel')).toBeVisible();
+    await expect(page.locator('#summaryPanelTitle')).toHaveText('Local AI summary');
+    await expect(page.locator('#summaryContent')).toContainText('Local summary.');
+    await expect(page.locator('#summaryContent')).toContainText('Action item.');
+    await expect(page.locator('#summaryMeta')).toContainText('Model: rubenftenorio/kimi-k25-local');
+
+    await page.locator('#chatInput').fill('What action items were mentioned?');
+    await page.locator('#chatSendButton').click();
+
+    await expect(page.locator('#chatHistory')).toContainText('Local summary.');
+    await expect(page.locator('#chatStatus')).toContainText(/conversation ready/i);
+    expect(requests.chat).toHaveLength(2);
+    expect(requests.chat.every((request) => request.kind === 'proxy')).toBe(true);
+
+    const browserState = await page.evaluate(() => window.__pyTranscribeTestState.browserAi);
+    expect(browserState.loadCalls).toBe(0);
+  });
+
+  test('integration: loads AI-Powered models from the same-origin bridge and uses them for summary and chat', async ({ page }) => {
+    const requests = await installAiPoweredRoutes(page);
+
+    await openApp(page, {
+      initialSettings: {
+        localAiRuntimeMode: 'ai-powered'
+      }
+    });
+
+    await expect(page.locator('#aiRuntimeSelect')).toHaveValue('ai-powered');
+    await expect(page.locator('#aiRuntimeMeta')).toContainText(/ai-powered mode uses the local provider bridge/i);
+    await expect(page.locator('#aiRuntimeMeta')).toContainText(/ai-powered endpoint: same-origin php bridge/i);
+    await expect(page.locator('#aiState')).toContainText(/ai-powered detected/i);
+    await expect(page.locator('#aiModelLabel')).toHaveText('AI-Powered model');
+    await expect(page.locator('#aiModelSelect')).toHaveValue('anthropic/claude-sonnet-4');
+    await expect(page.locator('#aiModelMeta')).toContainText(/Claude Sonnet 4/i);
+    await expect(page.locator('#checkAiButton')).toHaveText(/refresh ai-powered models/i);
+    expect(requests.health).toHaveLength(1);
+    expect(requests.models).toHaveLength(1);
+    expect(requests.health[0].kind).toBe('proxy');
+    expect(requests.models[0].kind).toBe('proxy');
+
+    await selectFilesViaButton(page, [createAudioFile({ name: 'ai-powered.wav' })]);
+    await loadRuntime(page);
+    await transcribeCurrentFile(page);
+
+    await expect(page.locator('#summarizeButton')).toBeEnabled();
+    await page.locator('#summaryDetailDetailed').check();
+    await page.locator('#summarizeButton').click();
+
+    await expect(page.locator('#summaryPanel')).toBeVisible();
+    await expect(page.locator('#summaryContent')).toContainText('AI-Powered summary.');
+    await expect(page.locator('#summaryContent')).toContainText('Action item.');
+    await expect(page.locator('#summaryMeta')).toContainText('Model: Claude Sonnet 4');
+
+    await page.locator('#chatInput').fill('What action items were mentioned?');
+    await page.locator('#chatSendButton').click();
+
+    await expect(page.locator('#chatHistory')).toContainText('AI-Powered reply.');
+    await expect(page.locator('#chatStatus')).toContainText(/conversation ready/i);
+    expect(requests.stream).toHaveLength(2);
+    expect(requests.stream[0].phase).toBe('summary');
+    expect(requests.stream[1].phase).toBe('chat');
+
+    const browserState = await page.evaluate(() => window.__pyTranscribeTestState.browserAi);
+    expect(browserState.loadCalls).toBe(0);
+  });
+
+  test('integration: falls back to browser WASM when the Ollama bridge is unavailable, then summarizes and chats locally', async ({ page }) => {
     const requests = await installLocalAiRoutes(page, {
       models: [],
       proxyTagsStatus: 500,
@@ -23,7 +120,9 @@ test.describe('Local AI summary flows', () => {
     await expect(page.locator('#aiRuntimeMeta')).toContainText(/last successful runtime: browser wasm/i);
     await expect(page.locator('#aiState')).toContainText(/browser model ready/i);
     await expect(page.locator('#checkAiButton')).toHaveText(/refresh browser model/i);
-    expect(requests.tags.map((request) => request.kind)).toEqual(['proxy', 'direct']);
+    expect(requests.tags[0].kind).toBe('proxy');
+    expect(requests.tags.some((request) => request.kind === 'direct')).toBe(true);
+    expect(requests.tags.length).toBeGreaterThanOrEqual(2);
 
     await selectFilesViaButton(page, [createAudioFile({ name: 'browser-fallback.wav' })]);
     await loadRuntime(page);
@@ -107,6 +206,7 @@ test.describe('Local AI summary flows', () => {
     await expect(page.locator('#aiState')).toContainText(/model ready/i);
     await expect(page.locator('#aiModelSelect')).toHaveValue('acme/kimi-large');
     await expect(page.locator('#aiModelMeta')).toContainText(/auto-selected via the ranking heuristic/i);
+    expect(requests.tags).toHaveLength(1);
     expect(requests.tags[0].kind).toBe('proxy');
     expect(requests.tags[0].url).toContain('/api/ollama/tags.php');
   });
@@ -119,6 +219,8 @@ test.describe('Local AI summary flows', () => {
 
     await openApp(page, { localAiAutoDownload: true });
     await expect.poll(() => requests.pull.length).toBe(1);
+    expect(requests.tags.length).toBeGreaterThanOrEqual(1);
+    expect(requests.tags.every((request) => request.kind === 'proxy')).toBe(true);
     expect(requests.pull[0].kind).toBe('proxy');
     expect(requests.pull[0].postData?.model).toBe('kimi-k3:cloud');
     await expect(page.locator('#aiState')).toContainText(/model ready/i);
@@ -155,7 +257,7 @@ test.describe('Local AI summary flows', () => {
     expect(requests.chat[1].postData.messages.at(-1).content).toBe('What action items were mentioned?');
   });
 
-  test('regression: falls back from the PHP bridge to loopback when the bridge returns 500', async ({ page }) => {
+  test('regression: prefers loopback even when the PHP bridge is unhealthy', async ({ page }) => {
     const requests = await installLocalAiRoutes(page, {
       models: [
         {
@@ -171,8 +273,9 @@ test.describe('Local AI summary flows', () => {
     await expect(page.locator('#aiState')).toContainText(/model ready/i);
     await expect(page.locator('#aiModelMeta')).toContainText(/installed model/i);
     await expect(page.locator('#aiRuntimeMeta')).toContainText(/ollama endpoint: http:\/\/127\.0\.0\.1:11434/i);
-    expect(requests.tags.map((request) => request.kind)).toEqual(['proxy', 'direct']);
-    expect(requests.tags[0].url).toContain('/api/ollama/tags.php');
+    expect(requests.tags).toHaveLength(2);
+    expect(requests.tags[0].kind).toBe('proxy');
+    expect(requests.tags[1].kind).toBe('direct');
     expect(requests.tags[1].url).toContain('/api/tags');
   });
 
@@ -210,7 +313,7 @@ test.describe('Local AI summary flows', () => {
     await expect(page.locator('#summaryPanel')).toBeVisible();
     await expect(page.locator('#summaryMeta')).toContainText('Model: rubenftenorio/kimi-k25-local');
     await expect(page.locator('#aiModelSelect')).toHaveValue('rubenftenorio/kimi-k25-local');
-    await expect(page.locator('#aiRuntimeMeta')).toContainText(/same-origin PHP bridge/i);
+    await expect(page.locator('#aiRuntimeMeta')).toContainText(/ollama endpoint: same-origin php bridge/i);
     await expect(page.locator('#aiRuntimeMeta')).toContainText(/last successful runtime: local ollama/i);
     await expect(page.locator('#chatPanel')).toBeVisible();
     await expect(page.locator('#chatStatus')).toContainText(/ask a follow-up question/i);
@@ -317,7 +420,8 @@ test.describe('Local AI summary flows', () => {
 
     await expect(page.locator('#aiState')).toContainText(/ollama detected/i);
     await expect(page.locator('#aiRuntimeMeta')).toContainText(/local-only mode/i);
-    expect(requests.tags.map((request) => request.kind)).toEqual(['proxy', 'direct']);
+    expect(requests.tags.length).toBeGreaterThan(0);
+    expect(requests.tags.some((request) => request.kind === 'direct')).toBe(true);
 
     const browserState = await page.evaluate(() => window.__pyTranscribeTestState.browserAi);
     expect(browserState.loadCalls).toBe(0);

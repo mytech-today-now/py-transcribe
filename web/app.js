@@ -25,6 +25,20 @@ import {
   isEnglishOnlyWhisperModel
 } from './lib/whisper.js';
 import {
+  AI_POWERED_PROXY_BASE_URL,
+  AI_POWERED_STATUS_MESSAGES,
+  chatWithAiPowered,
+  describeAiPoweredError,
+  fetchAiPoweredModels,
+  fetchAiPoweredModelsFromCandidates,
+  formatAiPoweredModelLabel,
+  normalizeAiPoweredBaseUrl,
+  normalizeAiPoweredModel,
+  resolveAiPoweredBaseUrlCandidates,
+  resolvePreferredAiPoweredModel,
+  summarizeWithAiPowered
+} from './lib/ai-powered.js';
+import {
   OLLAMA_DEFAULT_BASE_URL,
   OLLAMA_PROXY_BASE_URL,
   fetchOllamaModels,
@@ -106,7 +120,7 @@ const LANGUAGE_OPTIONS = [
 
 const STORAGE_KEY = 'py-transcribe:shared-hosting-state';
 const SESSION_FALLBACK_KEY = 'py-transcribe:shared-hosting-session';
-const SETTINGS_STORAGE_VERSION = 2;
+const SETTINGS_STORAGE_VERSION = 3;
 const DEFAULT_CLIENT_LIMIT = 2.5 * 1024 * 1024 * 1024;
 const DEFAULT_SERVER_LIMIT = 16 * 1024 * 1024;
 const LOCAL_AI_CHAT_HISTORY_LIMIT = 16;
@@ -167,8 +181,9 @@ const state = {
   transcriptNotice: '',
   serverBackup: null,
   serverBackupNotice: '',
+  eventLog: [],
   localAi: {
-    supported: shouldAttemptLocalAiDetection() || supportsBrowserLocalAi(),
+    supported: true,
     ollamaSupported: shouldAttemptLocalAiDetection(),
     browserSupported: supportsBrowserLocalAi(),
     runtimeMode: normalizeLocalAiRuntimeMode('auto'),
@@ -189,6 +204,30 @@ const state = {
     pulling: false,
     summarizing: false,
     installedModels: [],
+    aiPowered: {
+      modelId: '',
+      modelName: '',
+      loading: false,
+      ready: false,
+      status: 'idle',
+      message: '',
+      detail: '',
+      progress: null,
+      progressText: '',
+      warning: '',
+      error: '',
+      baseUrl: '',
+      models: [],
+      modelSelectionReason: '',
+      cached: false,
+      loadedAt: '',
+      storageWarning: '',
+      lastSuccessfulCheckAt: '',
+      lastSuccessfulRuntime: '',
+      lastSuccessfulRuntimeAt: '',
+      runtime: null,
+      loadRequestId: 0
+    },
     browser: {
       modelId: '',
       modelName: '',
@@ -314,6 +353,7 @@ function bindRefs() {
     'downloadZipButton',
     'copyButton',
     'aiModelSelect',
+    'aiModelLabel',
     'aiModelMeta',
     'checkAiButton',
     'summarizeButton',
@@ -374,7 +414,9 @@ function bindRefs() {
     'recordingState',
     'recordingPreview',
     'recordingPlayer',
-    'runtimeHint'
+    'runtimeHint',
+    'eventLog',
+    'eventLogList'
   ];
 
   for (const id of ids) {
@@ -817,8 +859,16 @@ function resolveCurrentLocalAiRuntimeKind() {
     return 'browser';
   }
 
+  if (requestedMode === LOCAL_AI_RUNTIME_MODES.aiPowered) {
+    return 'ai-powered';
+  }
+
   if (requestedMode === LOCAL_AI_RUNTIME_MODES.local) {
     return 'ollama';
+  }
+
+  if (state.localAi.runtimeKind === 'ai-powered' || state.localAi.aiPowered.loading || state.localAi.aiPowered.ready) {
+    return 'ai-powered';
   }
 
   if (state.localAi.runtimeKind === 'ollama' || state.localAi.checking || state.localAi.pulling || state.localAi.summarizing) {
@@ -858,6 +908,28 @@ function updateLocalAiRuntimeMode(mode, { persist = true } = {}) {
         state.localAi.modelName = preferred.label;
       }
     }
+  } else if (normalized === LOCAL_AI_RUNTIME_MODES.aiPowered) {
+    state.localAi.runtimeKind = 'ai-powered';
+    if (!state.localAi.aiPowered.modelId) {
+      const preferred = resolvePreferredAiPoweredModel(
+        state.localAi.aiPowered.models,
+        {
+          selectedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || '',
+          cachedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || ''
+        }
+      )?.model;
+
+      if (preferred) {
+        state.localAi.aiPowered.modelId = preferred.id;
+        state.localAi.aiPowered.modelName = preferred.name;
+        state.localAi.aiPowered.modelSelectionReason = 'selected';
+        state.settings.aiPoweredModelId = preferred.id;
+        state.settings.aiPoweredModelName = preferred.name;
+        state.settings.aiPoweredModelSelectionReason = 'selected';
+        state.localAi.modelId = preferred.id;
+        state.localAi.modelName = preferred.name;
+      }
+    }
   }
 
   if (persist) {
@@ -872,6 +944,14 @@ function renderLocalAiModelSelect() {
   }
 
   const runtimeKind = resolveCurrentLocalAiRuntimeKind();
+  if (refs.aiModelLabel) {
+    refs.aiModelLabel.textContent = runtimeKind === 'browser'
+      ? 'Browser model'
+      : runtimeKind === 'ai-powered'
+        ? 'AI-Powered model'
+        : 'Local AI model';
+  }
+
   if (runtimeKind === 'browser') {
     const selectedModelId = normalizeLocalAiText(
       state.localAi.browser.modelId
@@ -917,6 +997,76 @@ function renderLocalAiModelSelect() {
           ? 'Cached in OPFS.'
           : '',
         storageWarning
+      ].filter(Boolean).join(' ');
+    }
+
+    return;
+  }
+
+  if (runtimeKind === 'ai-powered') {
+    const selectedModelId = normalizeLocalAiText(
+      state.localAi.aiPowered.modelId
+        || state.settings.aiPoweredModelId
+        || resolvePreferredAiPoweredModel(state.localAi.aiPowered.models, {
+          selectedModelId: state.settings.aiPoweredModelId || '',
+          cachedModelId: state.localAi.aiPowered.modelId || ''
+        })?.model?.id
+    );
+    const fragment = document.createDocumentFragment();
+    const selectedModel = normalizeAiPoweredModel(
+      state.localAi.aiPowered.models.find((model) => {
+        const normalizedId = String(model?.id || '').trim().toLowerCase();
+        const normalizedName = String(model?.name || '').trim().toLowerCase();
+        const normalizedSelected = selectedModelId.toLowerCase();
+        return normalizedId === normalizedSelected || normalizedName === normalizedSelected;
+      })
+    ) || resolvePreferredAiPoweredModel(state.localAi.aiPowered.models, {
+      selectedModelId,
+      cachedModelId: state.localAi.aiPowered.modelId || ''
+    })?.model;
+
+    if (state.localAi.aiPowered.models.length) {
+      for (const optionModel of state.localAi.aiPowered.models) {
+        fragment.appendChild(optionNode(
+          optionModel.id,
+          formatAiPoweredModelLabel(optionModel),
+          optionModel.id === (selectedModel?.id || selectedModelId)
+        ));
+      }
+    } else {
+      const option = document.createElement('option');
+      option.value = selectedModelId;
+      option.textContent = 'No AI-Powered models detected yet';
+      option.selected = true;
+      option.disabled = true;
+      fragment.appendChild(option);
+    }
+
+    if (selectedModelId && selectedModel && selectedModel.id !== selectedModelId) {
+      const customOption = document.createElement('option');
+      customOption.value = selectedModelId;
+      customOption.textContent = `${selectedModelId} (selected, not returned yet)`;
+      customOption.selected = true;
+      fragment.insertBefore(customOption, fragment.firstChild);
+    }
+
+    refs.aiModelSelect.replaceChildren(fragment);
+    refs.aiModelSelect.value = selectedModel?.id || selectedModelId || refs.aiModelSelect.value || '';
+
+    if (refs.aiModelMeta) {
+      const selectedLabel = selectedModel
+        ? `Selected ${formatAiPoweredModelLabel(selectedModel)}.`
+        : 'Choose an available AI-Powered model for summaries and chat.';
+      const heuristicNote = state.localAi.aiPowered.modelSelectionReason === 'heuristic' && selectedModel
+        ? ' Auto-selected via the AI-Powered ranking heuristic.'
+        : '';
+      const modelCount = state.localAi.aiPowered.models.length;
+      const endpointText = describeAiPoweredEndpoint(state.localAi.aiPowered.baseUrl || state.settings.aiPoweredBaseUrl || state.config.aiPoweredBaseUrl || '');
+      const endpointSummary = endpointText ? `Endpoint: ${endpointText}.` : '';
+      refs.aiModelMeta.textContent = [
+        `${selectedLabel}${heuristicNote}`,
+        modelCount ? `${modelCount.toLocaleString()} AI-Powered model${modelCount === 1 ? '' : 's'} available.` : 'Waiting for AI-Powered to return models.',
+        endpointSummary
       ].filter(Boolean).join(' ');
     }
 
@@ -1018,6 +1168,7 @@ function syncLocalAiChatContext() {
   const summaryText = normalizeLocalAiText(state.localAi.summaryText);
   const currentSignature = buildLocalAiContextSignature(transcriptText, summaryText);
   const chat = state.localAi.chat;
+  const runtimeKind = resolveCurrentLocalAiRuntimeKind();
   const sessionHasDraft = Boolean(normalizeLocalAiText(chat.draft));
   const sessionHasMessages = chat.messages.length > 0;
 
@@ -1038,7 +1189,11 @@ function syncLocalAiChatContext() {
   } else if (chat.sending) {
     chat.status = 'thinking';
     chat.message = 'Thinking...';
-    chat.detail = 'Ollama is streaming a reply locally.';
+    chat.detail = runtimeKind === 'browser'
+      ? 'The browser runtime is streaming a reply locally.'
+      : runtimeKind === 'ai-powered'
+        ? 'AI-Powered is streaming a reply locally.'
+        : 'Ollama is streaming a reply locally.';
   } else if (chat.error) {
     chat.status = 'error';
     chat.message = 'Chat failed.';
@@ -1070,9 +1225,7 @@ function syncLocalAiChatContext() {
 
 function updateLocalAiModelSelection(modelName, { persist = true } = {}) {
   const nextValue = normalizeLocalAiText(modelName);
-  const runtimeKind = state.localAi.runtimeKind === 'browser' || normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode) === 'browser'
-    ? 'browser'
-    : 'ollama';
+  const runtimeKind = resolveCurrentLocalAiRuntimeKind();
 
   if (runtimeKind === 'browser') {
     const nextModel = getBrowserAiModelById(nextValue) || resolvePreferredBrowserAiModel({
@@ -1124,6 +1277,50 @@ function updateLocalAiModelSelection(modelName, { persist = true } = {}) {
         : 'Choose a browser model to load into the WASM runtime.';
     state.localAi.summaryError = '';
     state.localAi.chat.error = '';
+  } else if (runtimeKind === 'ai-powered') {
+    const nextModel = normalizeAiPoweredModel(
+      state.localAi.aiPowered.models.find((entry) => {
+        const normalizedId = String(entry?.id || '').trim().toLowerCase();
+        const normalizedName = String(entry?.name || '').trim().toLowerCase();
+        const normalizedValue = nextValue.toLowerCase();
+        return normalizedId === normalizedValue || normalizedName === normalizedValue;
+      })
+    ) || resolvePreferredAiPoweredModel(state.localAi.aiPowered.models, {
+      selectedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || '',
+      cachedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || ''
+    })?.model;
+
+    if (nextModel) {
+      state.localAi.aiPowered.modelId = nextModel.id;
+      state.localAi.aiPowered.modelName = nextModel.name;
+      state.localAi.aiPowered.modelSelectionReason = 'selected';
+      state.settings.aiPoweredModelId = nextModel.id;
+      state.settings.aiPoweredModelName = nextModel.name;
+      state.settings.aiPoweredModelSelectionReason = 'selected';
+      state.localAi.modelId = nextModel.id;
+      state.localAi.modelName = nextModel.name;
+      state.localAi.cachedModelName = nextModel.name;
+    }
+
+    state.localAi.available = Boolean(state.localAi.aiPowered.ready || state.localAi.aiPowered.models.length);
+    state.localAi.runtimeKind = 'ai-powered';
+    state.localAi.status = state.localAi.aiPowered.ready
+      ? 'ready'
+      : state.localAi.aiPowered.loading
+        ? 'checking'
+        : 'idle';
+    state.localAi.message = state.localAi.aiPowered.ready
+      ? AI_POWERED_STATUS_MESSAGES.ready
+      : state.localAi.aiPowered.loading
+        ? AI_POWERED_STATUS_MESSAGES.loading
+        : AI_POWERED_STATUS_MESSAGES.checking;
+    state.localAi.detail = nextModel
+      ? `Selected ${formatAiPoweredModelLabel(nextModel)} will load through AI-Powered.`
+      : state.localAi.aiPowered.models.length
+        ? 'Choose an available AI-Powered model for summaries and chat.'
+        : 'AI-Powered has not returned any models yet.';
+    state.localAi.summaryError = '';
+    state.localAi.chat.error = '';
   } else {
     const nextModelName = normalizeLocalAiText(nextValue);
     if (nextModelName) {
@@ -1165,16 +1362,21 @@ function renderLocalAiState() {
   const transcriptPresent = Boolean(normalizeLocalAiText(transcriptState.transcriptText));
   const runtimeKind = resolveCurrentLocalAiRuntimeKind();
   const browserWorking = state.localAi.browser.loading;
-  const isWorking = state.localAi.checking || state.localAi.pulling || state.localAi.summarizing || state.localAi.chat.sending || browserWorking;
+  const aiPoweredWorking = state.localAi.aiPowered.loading;
+  const isWorking = state.localAi.checking || state.localAi.pulling || state.localAi.summarizing || state.localAi.chat.sending || browserWorking || aiPoweredWorking;
   const hasSummary = Boolean(state.localAi.summaryText);
   const hasError = Boolean(state.localAi.summaryError);
   const shouldShowSummary = hasSummary || hasError;
   const detailLevel = LOCAL_AI_DETAIL_LEVELS[selectedSummaryDetail()];
   const selectedModelName = normalizeLocalAiText(runtimeKind === 'browser'
     ? state.localAi.browser.modelName || state.settings.localAiBrowserModelName || state.localAi.modelName
+    : runtimeKind === 'ai-powered'
+      ? state.localAi.aiPowered.modelName || state.settings.aiPoweredModelName || state.localAi.modelName
     : state.localAi.modelName || state.settings.localAiModelName);
   const modelIsInstalled = runtimeKind === 'browser'
     ? Boolean(state.localAi.browser.ready)
+    : runtimeKind === 'ai-powered'
+      ? Boolean(state.localAi.aiPowered.ready || state.localAi.aiPowered.models.length)
     : selectedModelName
       ? isInstalledLocalAiModel(selectedModelName)
       : false;
@@ -1194,10 +1396,14 @@ function renderLocalAiState() {
     state.localAi.chat.detail = 'Regenerate the summary before starting a chat session.';
   }
 
-  refs.aiState.textContent = browserWorking
-    ? state.localAi.browser.message || state.localAi.message || LOCAL_AI_STATUS_MESSAGES.browserLoading
+  refs.aiState.textContent = aiPoweredWorking
+    ? state.localAi.aiPowered.message || state.localAi.message || AI_POWERED_STATUS_MESSAGES.loading
+    : browserWorking
+    ? state.localAi.browser.message || state.localAi.message || LOCAL_AI_STATUS_MESSAGES.browserLoadingModel
     : state.localAi.message || (state.localAi.supported ? 'Not checked yet' : LOCAL_AI_STATUS_MESSAGES.unavailable);
-  refs.aiDetail.textContent = browserWorking || runtimeKind === 'browser'
+  refs.aiDetail.textContent = aiPoweredWorking || runtimeKind === 'ai-powered'
+    ? state.localAi.aiPowered.detail || state.localAi.detail || 'Connect to the local AI-Powered service to load provider models.'
+    : browserWorking || runtimeKind === 'browser'
     ? state.localAi.browser.detail || state.localAi.detail || 'Load a browser model into the WASM runtime.'
     : state.localAi.detail || (state.localAi.supported
       ? 'Check Ollama to download the latest Kimi model.'
@@ -1207,17 +1413,26 @@ function renderLocalAiState() {
     const runtimeMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto');
     const runtimeText = runtimeMode === LOCAL_AI_RUNTIME_MODES.browser
       ? 'Browser-only mode uses the cached Kimi GGUF model in OPFS.'
+      : runtimeMode === LOCAL_AI_RUNTIME_MODES.aiPowered
+        ? 'AI-Powered mode uses the local provider bridge and its model catalog for summaries and chat.'
       : runtimeMode === LOCAL_AI_RUNTIME_MODES.local
         ? 'Local-only mode prefers Ollama and does not switch to the browser model cache.'
         : 'Auto mode checks local Ollama first, then falls back to the browser WASM model if needed.';
     const endpointText = describeLocalAiEndpoint(state.localAi.baseUrl || state.settings.localAiBaseUrl || state.config.localAiBaseUrl || '');
+    const aiPoweredEndpointText = describeAiPoweredEndpoint(state.localAi.aiPowered.baseUrl || state.settings.aiPoweredBaseUrl || state.config.aiPoweredBaseUrl || '');
     const lastRuntimeText = state.localAi.lastSuccessfulRuntime === 'browser'
       ? 'Last successful runtime: Browser WASM.'
+      : state.localAi.lastSuccessfulRuntime === 'ai-powered'
+        ? 'Last successful runtime: AI-Powered.'
       : state.localAi.lastSuccessfulRuntime === 'ollama'
         ? 'Last successful runtime: Local Ollama.'
         : '';
-    const endpointSummary = endpointText
-      ? `Ollama endpoint: ${endpointText}.`
+    const endpointSummary = runtimeKind === 'ai-powered' || aiPoweredWorking
+      ? aiPoweredEndpointText
+        ? `AI-Powered endpoint: ${aiPoweredEndpointText}.`
+        : ''
+      : endpointText
+        ? `Ollama endpoint: ${endpointText}.`
       : '';
     const extras = [endpointSummary, lastRuntimeText, browserStorageWarning].filter(Boolean).join(' ');
     refs.aiRuntimeMeta.textContent = extras
@@ -1230,6 +1445,10 @@ function renderLocalAiState() {
       : modelIsInstalled
         ? 'Refresh browser model'
         : 'Load browser model'
+    : runtimeKind === 'ai-powered'
+      ? aiPoweredWorking
+        ? 'Connecting...'
+        : 'Refresh AI-Powered models'
     : state.localAi.status === 'unavailable'
       ? 'Retry Ollama'
       : state.localAi.checking
@@ -1241,6 +1460,21 @@ function renderLocalAiState() {
             : selectedModelName && isLocalAiPullCandidate(selectedModelName)
               ? 'Download selected model'
               : 'Download latest Kimi model';
+  refs.checkAiButton.title = runtimeKind === 'browser'
+    ? modelIsInstalled
+      ? 'Reload the browser model from OPFS.'
+      : 'Download the selected browser model into OPFS.'
+    : runtimeKind === 'ai-powered'
+      ? aiPoweredWorking
+        ? 'Connecting to the local AI-Powered service.'
+        : 'Refresh the AI-Powered model list from the local bridge.'
+      : modelIsInstalled
+        ? 'Refresh the installed Kimi model list from Ollama.'
+        : selectedModelName && isLocalAiPullCandidate(selectedModelName)
+          ? 'Download the selected Kimi model from Ollama.'
+          : state.localAi.status === 'unavailable'
+            ? `Retry Ollama after installing it from ${OLLAMA_DOWNLOAD_URL} on this desktop browser.`
+            : 'Check Ollama and download the latest Kimi model.';
   refs.checkAiButton.disabled = !state.localAi.supported || isWorking;
   refs.summarizeButton.textContent = state.localAi.summarizing ? 'Summarizing...' : 'Summarize transcript';
   refs.summarizeButton.disabled = !state.localAi.supported
@@ -1250,7 +1484,7 @@ function renderLocalAiState() {
     || isWorking;
   refs.cancelAiButton.hidden = !isWorking;
   refs.cancelAiButton.disabled = !isWorking;
-  refs.aiProgress.hidden = !state.localAi.pulling && !browserWorking;
+  refs.aiProgress.hidden = !state.localAi.pulling && !browserWorking && !aiPoweredWorking;
 
   if (state.localAi.pulling) {
     const progressValue = Number(state.localAi.progress);
@@ -1260,6 +1494,9 @@ function renderLocalAiState() {
       refs.aiProgressBar.removeAttribute('value');
     }
     refs.aiProgressText.textContent = state.localAi.progressText || 'Downloading Kimi model...';
+  } else if (aiPoweredWorking) {
+    refs.aiProgressBar.removeAttribute('value');
+    refs.aiProgressText.textContent = state.localAi.aiPowered.progressText || state.localAi.aiPowered.detail || AI_POWERED_STATUS_MESSAGES.loading;
   } else if (browserWorking) {
     const progressValue = Number(state.localAi.browser.progress);
     if (Number.isFinite(progressValue)) {
@@ -1450,6 +1687,7 @@ function cancelLocalAiWork({ silent = false } = {}) {
   }
 
   const hadCheck = state.localAi.checking || state.localAi.pulling;
+  const hadAiPoweredCheck = state.localAi.aiPowered.loading;
   const hadSummary = state.localAi.summarizing;
   const hadChat = state.localAi.chat.sending;
   state.localAi.checking = false;
@@ -1459,6 +1697,9 @@ function cancelLocalAiWork({ silent = false } = {}) {
   state.localAi.progress = null;
   state.localAi.progressText = '';
   state.localAi.activeController = null;
+  state.localAi.aiPowered.loading = false;
+  state.localAi.aiPowered.progress = null;
+  state.localAi.aiPowered.progressText = '';
 
   if (hadChat) {
     const lastMessage = state.localAi.chat.messages[state.localAi.chat.messages.length - 1];
@@ -1488,6 +1729,19 @@ function cancelLocalAiWork({ silent = false } = {}) {
     state.localAi.detail = 'Local AI check cancelled.';
   }
 
+  if (hadAiPoweredCheck && !silent) {
+    state.localAi.status = state.localAi.aiPowered.ready ? 'ready' : 'idle';
+    state.localAi.message = state.localAi.aiPowered.ready
+      ? AI_POWERED_STATUS_MESSAGES.ready
+      : AI_POWERED_STATUS_MESSAGES.unavailable;
+    state.localAi.detail = 'AI-Powered check cancelled.';
+    state.localAi.aiPowered.status = 'idle';
+    state.localAi.aiPowered.message = state.localAi.aiPowered.ready
+      ? AI_POWERED_STATUS_MESSAGES.ready
+      : AI_POWERED_STATUS_MESSAGES.unavailable;
+    state.localAi.aiPowered.detail = 'AI-Powered check cancelled.';
+  }
+
   renderAll();
 }
 
@@ -1507,6 +1761,7 @@ function setLocalAiUnavailable(detail, { keepModel = false } = {}) {
   if (!keepModel) {
     state.localAi.modelName = state.settings.localAiModelName || state.localAi.cachedModelName || '';
   }
+  setStatus(state.localAi.detail);
   renderAll();
 }
 
@@ -1548,6 +1803,98 @@ function setLocalAiReady(model, { source = 'installed', reason = '', checkedAt =
   state.settings.localAiLastSuccessfulRuntime = 'ollama';
   state.settings.localAiLastSuccessfulRuntimeAt = checkedAt;
   state.settings.localAiBaseUrl = normalizeOllamaBaseUrl(state.localAi.baseUrl || state.settings.localAiBaseUrl || state.config.localAiBaseUrl || '');
+  setStatus(state.localAi.detail);
+  persistSettings();
+  renderAll();
+}
+
+function setAiPoweredLocalAiUnavailable(detail, { keepModel = false } = {}) {
+  const message = detail || 'Connect to AI-Powered to enable summaries and chat.';
+  state.localAi.runtimeKind = 'ai-powered';
+  state.localAi.available = false;
+  state.localAi.checking = false;
+  state.localAi.pulling = false;
+  state.localAi.summarizing = false;
+  state.localAi.status = 'unavailable';
+  state.localAi.message = AI_POWERED_STATUS_MESSAGES.unavailable;
+  state.localAi.detail = message;
+  state.localAi.progress = null;
+  state.localAi.progressText = '';
+  state.localAi.summaryError = '';
+  state.localAi.activeController = null;
+  state.localAi.aiPowered.loading = false;
+  state.localAi.aiPowered.ready = false;
+  state.localAi.aiPowered.status = 'unavailable';
+  state.localAi.aiPowered.message = AI_POWERED_STATUS_MESSAGES.unavailable;
+  state.localAi.aiPowered.detail = message;
+  state.localAi.aiPowered.progress = null;
+  state.localAi.aiPowered.progressText = '';
+  state.localAi.aiPowered.error = message;
+  state.localAi.aiPowered.runtime = null;
+  if (!keepModel) {
+    state.localAi.aiPowered.modelId = state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || '';
+    state.localAi.aiPowered.modelName = state.settings.aiPoweredModelName || state.localAi.aiPowered.modelName || '';
+    state.localAi.modelId = state.localAi.aiPowered.modelId || '';
+    state.localAi.modelName = state.localAi.aiPowered.modelName || '';
+  }
+  setStatus(message);
+  renderAll();
+}
+
+function setAiPoweredLocalAiReady(model, { source = 'installed', reason = '', checkedAt = new Date().toISOString(), baseUrl = '' } = {}) {
+  const normalized = normalizeAiPoweredModel(model);
+  if (!normalized) {
+    setAiPoweredLocalAiUnavailable('AI-Powered returned an empty model entry.');
+    return;
+  }
+
+  const modelName = normalized.name;
+  state.localAi.available = true;
+  state.localAi.runtimeKind = 'ai-powered';
+  state.localAi.checking = false;
+  state.localAi.pulling = false;
+  state.localAi.summarizing = false;
+  state.localAi.status = 'ready';
+  state.localAi.message = AI_POWERED_STATUS_MESSAGES.ready;
+  state.localAi.detail = source === 'pulled'
+    ? `Using AI-Powered model: ${modelName}. It is ready for summaries and chat.`
+    : `Using AI-Powered model: ${modelName}.`;
+  state.localAi.progress = null;
+  state.localAi.progressText = '';
+  state.localAi.summaryError = '';
+  state.localAi.activeController = null;
+  state.localAi.modelSelectionReason = reason || state.localAi.modelSelectionReason || 'selected';
+  state.localAi.modelId = normalized.id;
+  state.localAi.modelName = modelName;
+  state.localAi.cachedModelName = modelName;
+  state.localAi.lastSuccessfulCheckAt = checkedAt;
+  state.localAi.lastSuccessfulRuntime = 'ai-powered';
+  state.localAi.lastSuccessfulRuntimeAt = checkedAt;
+  state.localAi.aiPowered.loading = false;
+  state.localAi.aiPowered.ready = true;
+  state.localAi.aiPowered.status = 'ready';
+  state.localAi.aiPowered.message = AI_POWERED_STATUS_MESSAGES.ready;
+  state.localAi.aiPowered.detail = state.localAi.detail;
+  state.localAi.aiPowered.progress = null;
+  state.localAi.aiPowered.progressText = '';
+  state.localAi.aiPowered.error = '';
+  state.localAi.aiPowered.cached = true;
+  state.localAi.aiPowered.loadedAt = checkedAt;
+  state.localAi.aiPowered.modelId = normalized.id;
+  state.localAi.aiPowered.modelName = modelName;
+  state.localAi.aiPowered.modelSelectionReason = reason || state.localAi.aiPowered.modelSelectionReason || 'selected';
+  state.localAi.aiPowered.lastSuccessfulCheckAt = checkedAt;
+  state.localAi.aiPowered.lastSuccessfulRuntime = 'ai-powered';
+  state.localAi.aiPowered.lastSuccessfulRuntimeAt = checkedAt;
+  state.localAi.aiPowered.baseUrl = normalizeAiPoweredBaseUrl(baseUrl || state.localAi.aiPowered.baseUrl || state.settings.aiPoweredBaseUrl || state.config.aiPoweredBaseUrl || '');
+  state.settings.aiPoweredBaseUrl = state.localAi.aiPowered.baseUrl;
+  state.settings.aiPoweredModelId = normalized.id;
+  state.settings.aiPoweredModelName = modelName;
+  state.settings.aiPoweredModelSelectionReason = state.localAi.aiPowered.modelSelectionReason;
+  state.settings.aiPoweredLastSuccessfulCheckAt = checkedAt;
+  state.settings.aiPoweredLastSuccessfulRuntime = 'ai-powered';
+  state.settings.aiPoweredLastSuccessfulRuntimeAt = checkedAt;
+  setStatus(`AI-Powered model ready: ${formatAiPoweredModelLabel(normalized)}.`);
   persistSettings();
   renderAll();
 }
@@ -1570,7 +1917,7 @@ async function setBrowserLocalAiLoading(model, { requestId = 0, forceRefresh = f
   state.localAi.pulling = false;
   state.localAi.summarizing = false;
   state.localAi.status = 'checking';
-  state.localAi.message = LOCAL_AI_STATUS_MESSAGES.browserLoading;
+  state.localAi.message = LOCAL_AI_STATUS_MESSAGES.browserLoadingModel;
   state.localAi.detail = forceRefresh
     ? `Reloading ${formatBrowserAiModelLabel(selectedModel)} into the browser runtime.`
     : `Loading ${formatBrowserAiModelLabel(selectedModel)} into the browser runtime.`;
@@ -1588,7 +1935,7 @@ async function setBrowserLocalAiLoading(model, { requestId = 0, forceRefresh = f
   state.localAi.browser.loading = true;
   state.localAi.browser.ready = false;
   state.localAi.browser.status = 'loading';
-  state.localAi.browser.message = LOCAL_AI_STATUS_MESSAGES.browserLoading;
+  state.localAi.browser.message = LOCAL_AI_STATUS_MESSAGES.browserLoadingModel;
   state.localAi.browser.detail = forceRefresh
     ? `Reloading ${formatBrowserAiModelLabel(selectedModel)} from the browser cache.`
     : `Loading ${formatBrowserAiModelLabel(selectedModel)} into the browser cache.`;
@@ -1608,6 +1955,7 @@ async function setBrowserLocalAiLoading(model, { requestId = 0, forceRefresh = f
   state.settings.localAiBrowserModelSizeLabel = selectedModel.sizeLabel;
   state.settings.localAiBrowserModelApproxBytes = selectedModel.approxSizeBytes;
   state.settings.localAiBrowserModelNote = selectedModel.note;
+  setStatus(state.localAi.message);
   renderAll();
 
   const storage = await estimateBrowserStorageQuota();
@@ -1634,8 +1982,8 @@ function updateBrowserLocalAiProgress(progress, { model } = {}) {
   state.localAi.available = false;
   state.localAi.status = 'checking';
   state.localAi.message = progressValue == null
-    ? LOCAL_AI_STATUS_MESSAGES.browserLoading
-    : `${LOCAL_AI_STATUS_MESSAGES.browserLoading} (${progressValue}%)`;
+    ? LOCAL_AI_STATUS_MESSAGES.browserLoadingModel
+    : `${LOCAL_AI_STATUS_MESSAGES.browserLoadingModel} (${progressValue}%)`;
   state.localAi.detail = progress?.message
     ? String(progress.message)
     : selectedModel
@@ -1768,6 +2116,91 @@ function updateLocalAiDownloadProgress(progress) {
   renderAll();
 }
 
+async function initializeAiPoweredLocalAi({ forceRefresh = false } = {}) {
+  if (state.localAi.checking || state.localAi.pulling || state.localAi.summarizing || state.localAi.aiPowered.loading) {
+    cancelLocalAiWork({ silent: true });
+  }
+
+  const requestId = state.localAi.aiPowered.loadRequestId + 1;
+  state.localAi.aiPowered.loadRequestId = requestId;
+  const controller = new AbortController();
+  state.localAi.activeController = controller;
+  state.localAi.available = false;
+  state.localAi.checking = true;
+  state.localAi.pulling = false;
+  state.localAi.summarizing = false;
+  state.localAi.status = 'checking';
+  state.localAi.message = AI_POWERED_STATUS_MESSAGES.loading;
+  state.localAi.detail = forceRefresh
+    ? 'Refreshing the AI-Powered model list.'
+    : 'Connecting to the local AI-Powered service.';
+  state.localAi.progress = null;
+  state.localAi.progressText = 'Connecting to AI-Powered...';
+  state.localAi.summaryError = '';
+  state.localAi.aiPowered.loading = true;
+  state.localAi.aiPowered.ready = false;
+  state.localAi.aiPowered.status = 'loading';
+  state.localAi.aiPowered.message = AI_POWERED_STATUS_MESSAGES.loading;
+  state.localAi.aiPowered.detail = state.localAi.detail;
+  state.localAi.aiPowered.progress = null;
+  state.localAi.aiPowered.progressText = 'Connecting to AI-Powered...';
+  state.localAi.aiPowered.error = '';
+  state.localAi.aiPowered.runtime = null;
+  state.localAi.aiPowered.baseUrl = resolveAiPoweredBaseUrl();
+  setStatus(AI_POWERED_STATUS_MESSAGES.loading);
+  renderAll();
+
+  try {
+    const { baseUrl, models } = await fetchAiPoweredModelsFromCandidates({
+      baseUrls: resolveAiPoweredBaseUrlCandidates(resolveAiPoweredBaseUrl()),
+      signal: controller.signal
+    });
+    if (controller.signal.aborted || requestId !== state.localAi.aiPowered.loadRequestId) {
+      return;
+    }
+
+    state.localAi.aiPowered.baseUrl = normalizeAiPoweredBaseUrl(baseUrl);
+    state.localAi.aiPowered.models = Array.isArray(models) ? models : [];
+
+    const preferredModel = resolvePreferredAiPoweredModel(state.localAi.aiPowered.models, {
+      selectedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || '',
+      cachedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || ''
+    });
+
+    if (!preferredModel?.model) {
+      setAiPoweredLocalAiUnavailable(
+        'AI-Powered returned no usable models. Check the provider configuration on the local ai-powered service.',
+        { keepModel: true }
+      );
+      return;
+    }
+
+    setAiPoweredLocalAiReady(preferredModel.model, {
+      source: preferredModel.reason === 'heuristic' ? 'installed' : preferredModel.reason,
+      reason: preferredModel.reason,
+      checkedAt: new Date().toISOString(),
+      baseUrl: state.localAi.aiPowered.baseUrl
+    });
+  } catch (error) {
+    if (controller.signal.aborted || requestId !== state.localAi.aiPowered.loadRequestId) {
+      return;
+    }
+
+    const detail = describeAiPoweredError(error, {
+      phase: 'connect',
+      baseUrl: resolveAiPoweredBaseUrl()
+    });
+    setAiPoweredLocalAiUnavailable(detail, { keepModel: true });
+  } finally {
+    if (requestId === state.localAi.aiPowered.loadRequestId) {
+      state.localAi.checking = false;
+      state.localAi.aiPowered.loading = false;
+      state.localAi.activeController = null;
+      renderAll();
+    }
+  }
+}
+
 async function initializeLocalAi({ forceRefresh = false } = {}) {
   const runtimeMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto');
   state.localAi.runtimeMode = runtimeMode;
@@ -1775,6 +2208,11 @@ async function initializeLocalAi({ forceRefresh = false } = {}) {
 
   if (runtimeMode === LOCAL_AI_RUNTIME_MODES.browser) {
     await initializeBrowserLocalAi({ forceRefresh });
+    return;
+  }
+
+  if (runtimeMode === LOCAL_AI_RUNTIME_MODES.aiPowered) {
+    await initializeAiPoweredLocalAi({ forceRefresh });
     return;
   }
 
@@ -1807,6 +2245,7 @@ async function initializeLocalAi({ forceRefresh = false } = {}) {
   state.localAi.progressText = '';
   state.localAi.summaryError = '';
   state.localAi.baseUrl = '';
+  setStatus(LOCAL_AI_STATUS_MESSAGES.checking);
   renderAll();
 
   try {
@@ -2103,8 +2542,8 @@ async function summarizeCurrentTranscript() {
     return;
   }
 
-  if (state.localAi.checking || state.localAi.pulling) {
-    setStatus('Wait for the Kimi model to finish loading.');
+  if (state.localAi.checking || state.localAi.pulling || state.localAi.aiPowered.loading) {
+    setStatus('Wait for the current local model to finish loading.');
     return;
   }
 
@@ -2119,23 +2558,36 @@ async function summarizeCurrentTranscript() {
   state.localAi.activeController = controller;
   state.localAi.summarizing = true;
   state.localAi.status = 'summarizing';
-  state.localAi.message = LOCAL_AI_STATUS_MESSAGES.summarizing;
-  state.localAi.detail = `Using ${state.localAi.modelName} at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`;
+  const runtimeMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto');
+  const runtimeKind = runtimeMode === LOCAL_AI_RUNTIME_MODES.local
+    ? 'ollama'
+    : runtimeMode === LOCAL_AI_RUNTIME_MODES.aiPowered
+      ? 'ai-powered'
+      : state.localAi.browser.ready && state.localAi.browser.runtime
+        ? 'browser'
+        : resolveCurrentLocalAiRuntimeKind();
+  const activeModelName = runtimeKind === 'browser'
+    ? state.localAi.browser.modelName || state.localAi.modelName
+    : runtimeKind === 'ai-powered'
+      ? state.localAi.aiPowered.modelName || state.localAi.modelName
+      : state.localAi.modelName;
+  const activeModelId = runtimeKind === 'ai-powered'
+    ? state.localAi.aiPowered.modelId || state.localAi.modelId
+    : state.localAi.modelId;
+  state.localAi.message = runtimeKind === 'ai-powered'
+    ? AI_POWERED_STATUS_MESSAGES.summarizing
+    : runtimeKind === 'browser'
+      ? LOCAL_AI_STATUS_MESSAGES.browserLoadingModel
+      : LOCAL_AI_STATUS_MESSAGES.summarizing;
+  state.localAi.detail = runtimeKind === 'ai-powered'
+    ? `Using AI-Powered model ${activeModelName} at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`
+    : `Using ${state.localAi.modelName} at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`;
   state.localAi.summaryError = '';
   state.localAi.summaryWarning = '';
   state.localAi.summaryDirty = false;
   state.localAi.summarySourceChars = transcript.length;
   state.localAi.summaryContextSignature = buildLocalAiTextSignature(transcript);
   const localAiBaseUrl = resolveLocalAiBaseUrl();
-  const runtimeMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto');
-  const runtimeKind = runtimeMode === LOCAL_AI_RUNTIME_MODES.local
-    ? 'ollama'
-    : state.localAi.browser.ready && state.localAi.browser.runtime
-      ? 'browser'
-      : resolveCurrentLocalAiRuntimeKind();
-  const activeModelName = runtimeKind === 'browser'
-    ? state.localAi.browser.modelName || state.localAi.modelName
-    : state.localAi.modelName;
   renderAll();
 
   try {
@@ -2145,6 +2597,14 @@ async function summarizeCurrentTranscript() {
         detailLevel,
         signal: controller.signal
       })
+      : runtimeKind === 'ai-powered'
+        ? await summarizeWithAiPowered({
+          modelId: activeModelId,
+          transcriptText: transcript,
+          detailLevel,
+          baseUrl: resolveAiPoweredBaseUrl(),
+          signal: controller.signal
+        })
       : await summarizeWithOllama({
         modelName: state.localAi.modelName,
         transcriptText: transcript,
@@ -2172,12 +2632,18 @@ async function summarizeCurrentTranscript() {
     state.localAi.status = 'ready';
     state.localAi.message = runtimeKind === 'browser'
       ? LOCAL_AI_STATUS_MESSAGES.browserReady
-      : LOCAL_AI_STATUS_MESSAGES.ready;
+      : runtimeKind === 'ai-powered'
+        ? AI_POWERED_STATUS_MESSAGES.ready
+        : LOCAL_AI_STATUS_MESSAGES.ready;
     state.localAi.detail = runtimeKind === 'browser'
       ? `Summarized with ${activeModelName} in the browser runtime at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`
+      : runtimeKind === 'ai-powered'
+        ? `Summarized with ${activeModelName} through AI-Powered at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`
       : `Summarized with ${state.localAi.modelName} at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`;
     state.localAi.activeController = null;
-    setStatus(`Summary ready with ${activeModelName}.`);
+    setStatus(runtimeKind === 'ai-powered'
+      ? `AI-Powered summary ready with ${activeModelName}.`
+      : `Summary ready with ${activeModelName}.`);
     renderAll();
   } catch (error) {
     if (controller.signal.aborted || requestId !== state.localAi.summarizeRequestId) {
@@ -2189,15 +2655,27 @@ async function summarizeCurrentTranscript() {
     state.localAi.status = 'ready';
     state.localAi.message = runtimeKind === 'browser'
       ? LOCAL_AI_STATUS_MESSAGES.browserReady
-      : LOCAL_AI_STATUS_MESSAGES.ready;
+      : runtimeKind === 'ai-powered'
+        ? AI_POWERED_STATUS_MESSAGES.ready
+        : LOCAL_AI_STATUS_MESSAGES.ready;
     state.localAi.detail = runtimeKind === 'browser'
       ? 'Browser summarization failed. You can retry with a smaller browser model or a different detail level.'
+      : runtimeKind === 'ai-powered'
+        ? describeAiPoweredError(error, {
+          phase: 'summary',
+          baseUrl: resolveAiPoweredBaseUrl()
+        })
       : 'Summarization failed. You can retry with a different detail level.';
     state.localAi.summaryError = runtimeKind === 'browser'
       ? describeBrowserAiError(error, {
         phase: 'summary',
         modelName: activeModelName
       })
+      : runtimeKind === 'ai-powered'
+        ? describeAiPoweredError(error, {
+          phase: 'summary',
+          baseUrl: resolveAiPoweredBaseUrl()
+        })
       : describeLocalAiError(error, {
         phase: 'summary',
         baseUrl: resolveLocalAiBaseUrl()
@@ -2338,10 +2816,30 @@ async function sendChatMessage() {
   state.localAi.chat.requestId = requestId;
   const controller = new AbortController();
   state.localAi.activeController = controller;
+  const runtimeMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto');
+  const runtimeKind = runtimeMode === LOCAL_AI_RUNTIME_MODES.local
+    ? 'ollama'
+    : runtimeMode === LOCAL_AI_RUNTIME_MODES.aiPowered
+      ? 'ai-powered'
+      : state.localAi.browser.ready && state.localAi.browser.runtime
+        ? 'browser'
+        : resolveCurrentLocalAiRuntimeKind();
+  const activeModelName = runtimeKind === 'browser'
+    ? state.localAi.browser.modelName || state.localAi.modelName
+    : runtimeKind === 'ai-powered'
+      ? state.localAi.aiPowered.modelName || state.localAi.modelName
+      : state.localAi.modelName;
+  const activeModelId = runtimeKind === 'ai-powered'
+    ? state.localAi.aiPowered.modelId || state.localAi.modelId
+    : state.localAi.modelId;
   state.localAi.chat.sending = true;
   state.localAi.chat.status = 'thinking';
   state.localAi.chat.message = 'Thinking...';
-  state.localAi.chat.detail = 'Ollama is streaming a reply locally.';
+  state.localAi.chat.detail = runtimeKind === 'browser'
+    ? 'The browser runtime is streaming a reply locally.'
+    : runtimeKind === 'ai-powered'
+      ? 'AI-Powered is streaming a reply locally.'
+      : 'Ollama is streaming a reply locally.';
   state.localAi.chat.error = '';
   state.localAi.chat.contextSignature = buildLocalAiContextSignature(transcriptText, summaryText);
   state.localAi.chat.messages.push(
@@ -2359,15 +2857,6 @@ async function sendChatMessage() {
   renderAll();
 
   let chatFailed = false;
-  const runtimeMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto');
-  const runtimeKind = runtimeMode === LOCAL_AI_RUNTIME_MODES.local
-    ? 'ollama'
-    : state.localAi.browser.ready && state.localAi.browser.runtime
-      ? 'browser'
-      : resolveCurrentLocalAiRuntimeKind();
-  const activeModelName = runtimeKind === 'browser'
-    ? state.localAi.browser.modelName || state.localAi.modelName
-    : state.localAi.modelName;
   try {
     const history = sanitizeLocalAiChatMessages(state.localAi.chat.messages.slice(0, -2));
     const localAiBaseUrl = resolveLocalAiBaseUrl();
@@ -2391,6 +2880,28 @@ async function sendChatMessage() {
           renderAll();
         }
       })
+      : runtimeKind === 'ai-powered'
+        ? await chatWithAiPowered({
+          modelId: activeModelId,
+          transcriptText,
+          summaryText,
+          history,
+          userMessage,
+          baseUrl: resolveAiPoweredBaseUrl(),
+          signal: controller.signal,
+          onChunk: (reply) => {
+            if (controller.signal.aborted || requestId !== state.localAi.chat.requestId) {
+              return;
+            }
+
+            const lastMessage = state.localAi.chat.messages[state.localAi.chat.messages.length - 1];
+            if (lastMessage) {
+              lastMessage.content = reply;
+              lastMessage.pending = true;
+            }
+            renderAll();
+          }
+        })
       : await chatWithOllama({
         modelName: state.localAi.modelName,
         transcriptText,
@@ -2428,10 +2939,14 @@ async function sendChatMessage() {
     state.localAi.chat.message = 'Conversation ready.';
     state.localAi.chat.detail = runtimeKind === 'browser'
       ? `Reply generated with ${activeModelName} in the browser runtime.`
-      : `Reply generated with ${state.localAi.modelName}.`;
+      : runtimeKind === 'ai-powered'
+        ? `Reply generated with ${activeModelName} through AI-Powered.`
+        : `Reply generated with ${state.localAi.modelName}.`;
     state.localAi.chat.error = '';
     state.localAi.activeController = null;
-    setStatus('Chat reply ready.');
+    setStatus(runtimeKind === 'ai-powered'
+      ? 'AI-Powered chat reply ready.'
+      : 'Chat reply ready.');
     persistSessionDraft();
     renderAll();
   } catch (error) {
@@ -2444,6 +2959,11 @@ async function sendChatMessage() {
         phase: 'chat',
         modelName: activeModelName
       })
+      : runtimeKind === 'ai-powered'
+        ? describeAiPoweredError(error, {
+          phase: 'chat',
+          baseUrl: resolveAiPoweredBaseUrl()
+        })
       : describeLocalAiError(error, {
         phase: 'chat',
         baseUrl: resolveLocalAiBaseUrl()
@@ -2969,6 +3489,7 @@ function renderAll() {
 
   updateRuntimeButtonLabel();
   updateDownloadLabels();
+  renderEventLog();
   persistSettings();
 }
 
@@ -3036,6 +3557,13 @@ function buildSettingsSnapshot() {
         : 'standard',
     localAiRuntimeMode: normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto'),
     localAiBaseUrl: normalizeOllamaBaseUrl(state.localAi.baseUrl || state.settings.localAiBaseUrl || state.config.localAiBaseUrl || ''),
+    aiPoweredBaseUrl: normalizeAiPoweredBaseUrl(state.localAi.aiPowered.baseUrl || state.settings.aiPoweredBaseUrl || state.config.aiPoweredBaseUrl || ''),
+    aiPoweredModelId: state.localAi.aiPowered.modelId || '',
+    aiPoweredModelName: state.localAi.aiPowered.modelName || '',
+    aiPoweredModelSelectionReason: state.localAi.aiPowered.modelSelectionReason || '',
+    aiPoweredLastSuccessfulCheckAt: state.localAi.aiPowered.lastSuccessfulCheckAt || '',
+    aiPoweredLastSuccessfulRuntime: state.localAi.aiPowered.lastSuccessfulRuntime || state.settings.aiPoweredLastSuccessfulRuntime || '',
+    aiPoweredLastSuccessfulRuntimeAt: state.localAi.aiPowered.lastSuccessfulRuntimeAt || state.settings.aiPoweredLastSuccessfulRuntimeAt || '',
     localAiModelName: state.localAi.modelName || '',
     localAiLastSuccessfulCheckAt: state.localAi.lastSuccessfulCheckAt || '',
     localAiLastSuccessfulRuntime: state.localAi.lastSuccessfulRuntime || state.settings.localAiLastSuccessfulRuntime || '',
@@ -3146,6 +3674,13 @@ function loadSettings() {
     summaryDetail: 'standard',
     localAiRuntimeMode: normalizeLocalAiRuntimeMode(injected.localAiRuntimeMode || LOCAL_AI_RUNTIME_MODES.auto),
     localAiBaseUrl: normalizeOllamaBaseUrl(injected.localAiBaseUrl || LOCAL_AI_PROXY_BASE_URL),
+    aiPoweredBaseUrl: normalizeAiPoweredBaseUrl(injected.aiPoweredBaseUrl || AI_POWERED_PROXY_BASE_URL),
+    aiPoweredModelId: '',
+    aiPoweredModelName: '',
+    aiPoweredModelSelectionReason: '',
+    aiPoweredLastSuccessfulCheckAt: '',
+    aiPoweredLastSuccessfulRuntime: '',
+    aiPoweredLastSuccessfulRuntimeAt: '',
     localAiModelName: '',
     localAiLastSuccessfulCheckAt: '',
     localAiLastSuccessfulRuntime: '',
@@ -3188,6 +3723,13 @@ function loadSettings() {
       summaryDetail: normalizeLocalAiDetailLevel(parsed?.summaryDetail || defaults.summaryDetail),
       localAiRuntimeMode: normalizeLocalAiRuntimeMode(parsed?.localAiRuntimeMode || defaults.localAiRuntimeMode),
       localAiBaseUrl: normalizeOllamaBaseUrl(parsed?.localAiBaseUrl || defaults.localAiBaseUrl),
+      aiPoweredBaseUrl: normalizeAiPoweredBaseUrl(parsed?.aiPoweredBaseUrl || defaults.aiPoweredBaseUrl),
+      aiPoweredModelId: String(parsed?.aiPoweredModelId || ''),
+      aiPoweredModelName: String(parsed?.aiPoweredModelName || ''),
+      aiPoweredModelSelectionReason: String(parsed?.aiPoweredModelSelectionReason || ''),
+      aiPoweredLastSuccessfulCheckAt: String(parsed?.aiPoweredLastSuccessfulCheckAt || ''),
+      aiPoweredLastSuccessfulRuntime: String(parsed?.aiPoweredLastSuccessfulRuntime || ''),
+      aiPoweredLastSuccessfulRuntimeAt: String(parsed?.aiPoweredLastSuccessfulRuntimeAt || ''),
       localAiModelName: String(parsed?.localAiModelName || ''),
       localAiLastSuccessfulCheckAt: String(parsed?.localAiLastSuccessfulCheckAt || ''),
       localAiLastSuccessfulRuntime: String(parsed?.localAiLastSuccessfulRuntime || ''),
@@ -3225,8 +3767,15 @@ function loadSettings() {
 function applySettingsSnapshot() {
   state.localAi.runtimeMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || 'auto');
   state.localAi.baseUrl = normalizeOllamaBaseUrl(state.settings.localAiBaseUrl || state.config.localAiBaseUrl || '');
+  state.localAi.aiPowered.baseUrl = normalizeAiPoweredBaseUrl(state.settings.aiPoweredBaseUrl || state.config.aiPoweredBaseUrl || '');
   state.localAi.modelName = state.settings.localAiModelName || '';
   state.localAi.cachedModelName = state.settings.localAiModelName || '';
+  state.localAi.aiPowered.modelId = state.settings.aiPoweredModelId || '';
+  state.localAi.aiPowered.modelName = state.settings.aiPoweredModelName || '';
+  state.localAi.aiPowered.modelSelectionReason = state.settings.aiPoweredModelSelectionReason || '';
+  state.localAi.aiPowered.lastSuccessfulCheckAt = state.settings.aiPoweredLastSuccessfulCheckAt || '';
+  state.localAi.aiPowered.lastSuccessfulRuntime = state.settings.aiPoweredLastSuccessfulRuntime || '';
+  state.localAi.aiPowered.lastSuccessfulRuntimeAt = state.settings.aiPoweredLastSuccessfulRuntimeAt || '';
   state.localAi.lastSuccessfulCheckAt = state.settings.localAiLastSuccessfulCheckAt || '';
   state.localAi.lastSuccessfulRuntime = state.settings.localAiLastSuccessfulRuntime || '';
   state.localAi.lastSuccessfulRuntimeAt = state.settings.localAiLastSuccessfulRuntimeAt || '';
@@ -3619,7 +4168,8 @@ function readConfig() {
     storageEnabled: Boolean(injected.storageEnabled ?? true),
     localAiAutoDownload: Boolean(injected.localAiAutoDownload ?? true),
     localAiRuntimeMode: normalizeLocalAiRuntimeMode(injected.localAiRuntimeMode || LOCAL_AI_RUNTIME_MODES.auto),
-    localAiBaseUrl: String(injected.localAiBaseUrl || LOCAL_AI_PROXY_BASE_URL)
+    localAiBaseUrl: String(injected.localAiBaseUrl || LOCAL_AI_PROXY_BASE_URL),
+    aiPoweredBaseUrl: String(injected.aiPoweredBaseUrl || AI_POWERED_PROXY_BASE_URL)
   };
 }
 
@@ -3633,6 +4183,21 @@ function resolveLocalAiBaseUrl() {
   return configured || LOCAL_AI_PROXY_BASE_URL;
 }
 
+function resolveAiPoweredBaseUrl() {
+  const selected = normalizeAiPoweredBaseUrl(
+    state.localAi.aiPowered.baseUrl
+      || state.settings.aiPoweredBaseUrl
+      || state.config.aiPoweredBaseUrl
+      || ''
+  );
+  if (selected) {
+    return selected;
+  }
+
+  const configured = normalizeAiPoweredBaseUrl(state.config.aiPoweredBaseUrl || '');
+  return configured || AI_POWERED_PROXY_BASE_URL;
+}
+
 function describeLocalAiEndpoint(baseUrl) {
   const normalized = normalizeOllamaBaseUrl(baseUrl);
   if (!normalized) {
@@ -3644,13 +4209,71 @@ function describeLocalAiEndpoint(baseUrl) {
     : normalized;
 }
 
+function describeAiPoweredEndpoint(baseUrl) {
+  const normalized = normalizeAiPoweredBaseUrl(baseUrl);
+  if (!normalized) {
+    return '';
+  }
+
+  return normalized === AI_POWERED_PROXY_BASE_URL
+    ? 'same-origin PHP bridge'
+    : normalized;
+}
+
 function parseInteger(value, fallback) {
   const parsed = Number.parseInt(String(value), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function setStatus(message) {
-  refs.status.textContent = message;
+  const text = String(message || '').trim();
+  if (!text) {
+    return;
+  }
+
+  const current = state.eventLog[0];
+  if (!current || current.message !== text) {
+    state.eventLog.unshift({
+      message: text,
+      at: new Date().toISOString()
+    });
+    state.eventLog = state.eventLog.slice(0, 16);
+  } else {
+    current.at = new Date().toISOString();
+  }
+
+  renderEventLog();
+}
+
+function renderEventLog() {
+  if (refs.status) {
+    refs.status.textContent = state.eventLog[0]?.message || 'Ready.';
+  }
+
+  if (!refs.eventLogList) {
+    return;
+  }
+
+  const entries = state.eventLog.length ? state.eventLog : [{ message: 'Ready.', at: new Date().toISOString() }];
+  const fragment = document.createDocumentFragment();
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const item = document.createElement('li');
+    item.className = 'event-log-entry';
+    if (index === 0) {
+      item.dataset.current = 'true';
+    }
+
+    const text = document.createElement('span');
+    text.className = 'event-log-message';
+    text.textContent = entry.message;
+
+    item.appendChild(text);
+    fragment.appendChild(item);
+  }
+
+  refs.eventLogList.replaceChildren(fragment);
 }
 
 function toggleDialog(dialog) {

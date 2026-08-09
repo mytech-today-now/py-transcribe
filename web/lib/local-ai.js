@@ -72,20 +72,28 @@ export function normalizeOllamaBaseUrl(baseUrl) {
   return String(baseUrl || '').trim().replace(/\/+$/, '');
 }
 
-export function resolveOllamaBaseUrlCandidates(baseUrl = OLLAMA_DEFAULT_BASE_URL) {
+export function resolveOllamaBaseUrlCandidates(baseUrl = OLLAMA_PROXY_BASE_URL) {
   const normalizedBaseUrl = normalizeOllamaBaseUrl(baseUrl);
   const candidates = [];
   const isAbsoluteBaseUrl = /^[a-z][a-z\d+.-]*:\/\//i.test(normalizedBaseUrl);
+  const isLoopbackBaseUrl = normalizedBaseUrl === OLLAMA_DEFAULT_BASE_URL
+    || normalizedBaseUrl === OLLAMA_LOCALHOST_BASE_URL
+    || normalizedBaseUrl === OLLAMA_IPV6_LOOPBACK_BASE_URL;
 
-  if (normalizedBaseUrl && isAbsoluteBaseUrl) {
+  if (normalizedBaseUrl && !isAbsoluteBaseUrl) {
     candidates.push(normalizedBaseUrl);
   }
 
+  if (normalizedBaseUrl && isAbsoluteBaseUrl && !isLoopbackBaseUrl) {
+    candidates.push(normalizedBaseUrl);
+  }
+
+  candidates.push(OLLAMA_PROXY_BASE_URL);
   candidates.push(OLLAMA_DEFAULT_BASE_URL);
   candidates.push(OLLAMA_LOCALHOST_BASE_URL);
   candidates.push(OLLAMA_IPV6_LOOPBACK_BASE_URL);
 
-  if (normalizedBaseUrl && !isAbsoluteBaseUrl) {
+  if (normalizedBaseUrl && isAbsoluteBaseUrl && isLoopbackBaseUrl) {
     candidates.push(normalizedBaseUrl);
   }
 
@@ -378,7 +386,7 @@ export async function fetchOllamaModels({
 }
 
 export async function fetchOllamaModelsFromCandidates({
-  baseUrls = [OLLAMA_DEFAULT_BASE_URL, OLLAMA_LOCALHOST_BASE_URL, OLLAMA_IPV6_LOOPBACK_BASE_URL, OLLAMA_PROXY_BASE_URL],
+  baseUrls = [OLLAMA_PROXY_BASE_URL, OLLAMA_DEFAULT_BASE_URL, OLLAMA_LOCALHOST_BASE_URL, OLLAMA_IPV6_LOOPBACK_BASE_URL],
   signal,
   fetchImpl = fetch
 } = {}) {

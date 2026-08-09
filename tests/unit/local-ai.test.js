@@ -105,7 +105,7 @@ describe('local AI helpers', () => {
     expect(requests).toEqual(['api/ollama/tags.php']);
   });
 
-  it('prefers the configured proxy bridge before loopback Ollama endpoints', () => {
+  it('prefers the configured Ollama proxy bridge before loopback endpoints', () => {
     expect(resolveOllamaBaseUrlCandidates('api/ollama')).toEqual([
       'api/ollama',
       'http://127.0.0.1:11434',
@@ -114,17 +114,17 @@ describe('local AI helpers', () => {
     ]);
   });
 
-  it('keeps custom absolute Ollama endpoints alongside the proxy bridge', () => {
+  it('keeps custom absolute Ollama endpoints ahead of loopback candidates', () => {
     expect(resolveOllamaBaseUrlCandidates('http://example.test:11434')).toEqual([
-      'api/ollama',
       'http://example.test:11434',
+      'api/ollama',
       'http://127.0.0.1:11434',
       'http://localhost:11434',
       'http://[::1]:11434'
     ]);
   });
 
-  it('falls back through candidate endpoints until Ollama responds', async () => {
+  it('falls back through proxy and loopback candidate endpoints until Ollama responds', async () => {
     const requests = [];
 
     const result = await fetchOllamaModelsFromCandidates({

@@ -7,6 +7,8 @@ test.describe('Runtime loading', () => {
     await loadRuntime(page);
 
     await expect(page.locator('#status')).toContainText(/pyodide and base whisper are ready/i);
+    await expect(page.locator('#eventLog')).toHaveJSProperty('open', true);
+    await expect(page.locator('#eventLogList .event-log-entry').first()).toContainText(/pyodide and base whisper are ready/i);
     await expect(page.locator('#loadRuntimeButton')).toHaveText('Load Whisper / Python');
     await expect(page.locator('#runtimeBadge')).toHaveText('Loaded');
     await expect(page.locator('#runtimeState')).toHaveText('Base ready');
@@ -43,10 +45,12 @@ test.describe('Runtime loading', () => {
     await loadRuntime(page);
 
     await expect(page.locator('#status')).toContainText(/loading pyodide and base whisper/i);
+    await expect(page.locator('#eventLogList .event-log-entry').first()).toContainText(/loading pyodide and base whisper/i);
     await expect(page.locator('#runtimeBadge')).toHaveText('Loading');
     await expect(page.locator('#loadRuntimeButton')).toBeDisabled();
 
     await expect(page.locator('#status')).toContainText(/pyodide and base whisper are ready/i);
+    await expect(page.locator('#eventLogList .event-log-entry').first()).toContainText(/pyodide and base whisper are ready/i);
     await expect(page.locator('#runtimeBadge')).toHaveText('Loaded');
   });
 });
