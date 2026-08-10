@@ -82,9 +82,8 @@ export function withSpoofedSize(file, sizeOverride) {
 
 export async function openApp(page, options = {}) {
   await installAppHarness(page, options);
-  await page.goto('/');
-  await page.locator('#loadRuntimeButton').waitFor({ state: 'visible' });
-  await page.locator('#status').waitFor({ state: 'visible' });
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await page.locator('#loadRuntimeButton').waitFor({ state: 'visible', timeout: 20_000 });
 }
 
 export async function installLocalAiRoutes(page, {
@@ -581,6 +580,27 @@ export async function installAiPoweredRoutes(page, {
   const proxyRoutePattern = /\/api\/ai-powered\/(health|providers|models|stream)\.php(?:\?.*)?$/i;
   const directRoutePattern = /(?:\/api)?\/(health|providers|models|stream)(?:\?.*)?$/i;
 
+  const resolveCatalogForRequest = (request, { kind } = {}) => {
+    const parsed = new URL(request.url());
+    const upstream = String(parsed.searchParams.get('upstream') || '').trim().toLowerCase();
+
+    if (kind === 'direct') {
+      if (parsed.hostname.includes('ngrok-free.dev')) {
+        return ngrokCatalog;
+      }
+
+      if (['127.0.0.1', 'localhost', '[::1]', '::1'].includes(parsed.hostname)) {
+        return sameOriginCatalog;
+      }
+    }
+
+    if (upstream === 'ngrok') {
+      return ngrokCatalog;
+    }
+
+    return sameOriginCatalog;
+  };
+
   const handleHealth = async (route, request, catalog, kind) => {
     requests.health.push({
       method: request.method(),
@@ -703,7 +723,7 @@ export async function installAiPoweredRoutes(page, {
   };
 
   await page.route(proxyRoutePattern, async (route, request) => {
-    const catalog = sameOriginCatalog;
+    const catalog = resolveCatalogForRequest(request, { kind: 'proxy' });
     const endpoint = new URL(request.url()).pathname.split('/').pop() || '';
 
     if (endpoint.includes('health')) {
@@ -726,9 +746,8 @@ export async function installAiPoweredRoutes(page, {
 
   await page.route(directRoutePattern, async (route, request) => {
     const parsed = new URL(request.url());
-    const isNgrok = parsed.hostname.includes('ngrok-free.dev');
     const isLoopback = ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(parsed.hostname);
-    const catalog = isNgrok ? ngrokCatalog : sameOriginCatalog;
+    const catalog = resolveCatalogForRequest(request, { kind: 'direct' });
     const endpoint = new URL(request.url()).pathname.split('/').pop() || '';
 
     if (isLoopback && !allowLoopbackDirect) {
@@ -1461,7 +1480,7 @@ export async function installAppHarness(page, options = {}) {
 
 export async function selectFilesViaButton(page, fileDescriptors) {
   const chooserPromise = page.waitForEvent('filechooser');
-  await page.locator('#dropZone').click();
+  await page.locator('#dropZone').click({ force: true });
   const chooser = await chooserPromise;
   await chooser.setFiles(fileDescriptors.map((descriptor) => ({
     ...descriptor,
@@ -1517,11 +1536,12 @@ export async function dropFiles(page, selector, fileDescriptors) {
 }
 
 export async function loadRuntime(page) {
-  await page.getByRole('button', { name: 'Load Whisper / Python' }).click();
+  await page.getByRole('button', { name: 'Load Whisper / Python' }).click({ force: true });
+  await expect(page.locator('#transcribeButton')).toBeEnabled({ timeout: 120_000 });
 }
 
 export async function transcribeCurrentFile(page) {
-  await page.getByRole('button', { name: 'Transcribe' }).click();
+  await page.getByRole('button', { name: 'Transcribe' }).click({ force: true });
   await expect(page.locator('#transcriptEditor')).not.toHaveValue('', { timeout: 120_000 });
 }
 

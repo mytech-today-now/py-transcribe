@@ -62,10 +62,33 @@ export function buildOllamaApiUrl(baseUrl = OLLAMA_DEFAULT_BASE_URL, endpoint) {
   }
 
   if (/^[a-z][a-z\d+.-]*:\/\//i.test(normalizedBaseUrl)) {
-    return `${normalizedBaseUrl}/api/${normalizedEndpoint}`;
+    const upstream = deriveOllamaUpstreamToken(normalizedBaseUrl);
+    const proxyUrl = `${OLLAMA_PROXY_BASE_URL}/${normalizedEndpoint}.php`;
+    return upstream ? `${proxyUrl}?upstream=${encodeURIComponent(upstream)}` : proxyUrl;
   }
 
   return `${normalizedBaseUrl}/${normalizedEndpoint}.php`;
+}
+
+function deriveOllamaUpstreamToken(baseUrl) {
+  const normalized = normalizeOllamaBaseUrl(baseUrl);
+  if (!normalized || normalized === OLLAMA_PROXY_BASE_URL) {
+    return '';
+  }
+
+  if (normalized === OLLAMA_DEFAULT_BASE_URL) {
+    return '127.0.0.1';
+  }
+
+  if (normalized === OLLAMA_LOCALHOST_BASE_URL) {
+    return 'localhost';
+  }
+
+  if (normalized === OLLAMA_IPV6_LOOPBACK_BASE_URL) {
+    return 'ipv6';
+  }
+
+  return '';
 }
 
 export function normalizeOllamaBaseUrl(baseUrl) {
@@ -675,11 +698,11 @@ export function describeLocalAiError(error, { phase = 'connect', baseUrl = OLLAM
   }
 
   if (lowered.includes('failed to fetch') || lowered.includes('networkerror') || /\bload failed\b/i.test(lowered)) {
-    return `Ollama is not running on this machine or the browser cannot reach ${baseUrl}. Install Ollama from ${OLLAMA_DOWNLOAD_URL}, start it with ollama serve, then click Retry.`;
+    return `Could not reach Ollama through the same-origin bridge. Start Ollama on this machine, then click Retry.`;
   }
 
   if (lowered.includes('cors') || lowered.includes('origin')) {
-    return `The browser blocked access to Ollama at ${baseUrl}. If Ollama is already running, allow this app in OLLAMA_ORIGINS or keep the same-origin PHP Ollama bridge enabled, then click Retry.`;
+    return `The browser blocked a direct Ollama request. Keep the same-origin PHP bridge enabled so the production origin can reach local Ollama without CORS errors, then click Retry.`;
   }
 
   if (phase === 'summary') {

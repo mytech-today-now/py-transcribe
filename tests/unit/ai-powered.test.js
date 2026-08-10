@@ -15,9 +15,9 @@ describe('AI-Powered helpers', () => {
   it('builds direct and same-origin AI-Powered request URLs', () => {
     expect(buildAiPoweredApiUrl('api/ai-powered', 'health')).toBe('api/ai-powered/health.php');
     expect(buildAiPoweredApiUrl('api/ai-powered', 'providers')).toBe('api/ai-powered/providers.php');
-    expect(buildAiPoweredApiUrl('http://127.0.0.1:3001', 'health')).toBe('http://127.0.0.1:3001/health');
-    expect(buildAiPoweredApiUrl('http://localhost:3001', 'stream')).toBe('http://localhost:3001/stream');
-    expect(buildAiPoweredApiUrl(AI_POWERED_NGROK_BASE_URL, 'providers')).toBe(`${AI_POWERED_NGROK_BASE_URL}/providers`);
+    expect(buildAiPoweredApiUrl('http://127.0.0.1:3001', 'health')).toBe('api/ai-powered/health.php?upstream=local');
+    expect(buildAiPoweredApiUrl('http://localhost:3001', 'stream')).toBe('api/ai-powered/stream.php?upstream=localhost');
+    expect(buildAiPoweredApiUrl(AI_POWERED_NGROK_BASE_URL, 'providers')).toBe('api/ai-powered/providers.php?upstream=ngrok');
   });
 
   it('prefers the configured AI-Powered proxy bridge before ngrok and loopback endpoints', () => {
@@ -35,15 +35,7 @@ describe('AI-Powered helpers', () => {
     const fetchImpl = async (url) => {
       requests.push(String(url));
 
-      if (String(url).startsWith('api/ai-powered/health.php')) {
-        return {
-          ok: false,
-          status: 502,
-          text: async () => 'bridge unavailable'
-        };
-      }
-
-      if (String(url).startsWith(`${AI_POWERED_NGROK_BASE_URL}/health`)) {
+      if (String(url).startsWith('api/ai-powered/health.php?upstream=ngrok')) {
         return {
           ok: true,
           status: 200,
@@ -52,7 +44,15 @@ describe('AI-Powered helpers', () => {
         };
       }
 
-      if (String(url).startsWith(`${AI_POWERED_NGROK_BASE_URL}/models`)) {
+      if (String(url).startsWith('api/ai-powered/health.php')) {
+        return {
+          ok: false,
+          status: 502,
+          text: async () => 'bridge unavailable'
+        };
+      }
+
+      if (String(url).startsWith('api/ai-powered/models.php?upstream=ngrok')) {
         return {
           ok: true,
           status: 200,
@@ -81,8 +81,8 @@ describe('AI-Powered helpers', () => {
     ]));
     expect(requests).toEqual([
       'api/ai-powered/health.php',
-      `${AI_POWERED_NGROK_BASE_URL}/health`,
-      `${AI_POWERED_NGROK_BASE_URL}/models?modality=text`
+      'api/ai-powered/health.php?upstream=ngrok',
+      'api/ai-powered/models.php?upstream=ngrok&modality=text'
     ]);
   });
 
@@ -144,6 +144,15 @@ describe('AI-Powered helpers', () => {
       requests.push(String(url));
       const text = String(url);
 
+      if (text.startsWith('api/ai-powered/health.php?upstream=ngrok')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ status: 'ok', service: 'ai-powered' }),
+          text: async () => ''
+        };
+      }
+
       if (text.startsWith('api/ai-powered/health.php')) {
         return {
           ok: true,
@@ -154,50 +163,26 @@ describe('AI-Powered helpers', () => {
       }
 
       if (text.startsWith('api/ai-powered/providers.php')) {
+        const parsed = new URL(text, 'http://example.test');
+        const upstream = parsed.searchParams.get('upstream') || '';
         return {
           ok: true,
           status: 200,
-          json: async () => sameOriginProviders,
+          json: async () => upstream === 'ngrok' ? ngrokProviders : sameOriginProviders,
           text: async () => ''
         };
       }
 
       if (text.startsWith('api/ai-powered/models.php')) {
         const parsed = new URL(text, 'http://example.test');
+        const upstream = parsed.searchParams.get('upstream') || '';
         const provider = parsed.searchParams.get('provider') || '';
         return {
           ok: true,
           status: 200,
-          json: async () => catalogModels.sameOrigin[provider] || [],
-          text: async () => ''
-        };
-      }
-
-      if (text.startsWith(`${AI_POWERED_NGROK_BASE_URL}/health`)) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ status: 'ok', service: 'ai-powered' }),
-          text: async () => ''
-        };
-      }
-
-      if (text.startsWith(`${AI_POWERED_NGROK_BASE_URL}/providers`)) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ngrokProviders,
-          text: async () => ''
-        };
-      }
-
-      if (text.startsWith(`${AI_POWERED_NGROK_BASE_URL}/models`)) {
-        const parsed = new URL(text);
-        const provider = parsed.searchParams.get('provider') || '';
-        return {
-          ok: true,
-          status: 200,
-          json: async () => catalogModels.ngrok[provider] || [],
+          json: async () => (upstream === 'ngrok'
+            ? catalogModels.ngrok[provider] || []
+            : catalogModels.sameOrigin[provider] || []),
           text: async () => ''
         };
       }
@@ -232,10 +217,10 @@ describe('AI-Powered helpers', () => {
       'api/ai-powered/providers.php',
       'api/ai-powered/models.php?provider=anthropic&modality=text',
       'api/ai-powered/models.php?provider=openai&modality=text',
-      `${AI_POWERED_NGROK_BASE_URL}/health`,
-      `${AI_POWERED_NGROK_BASE_URL}/providers`,
-      `${AI_POWERED_NGROK_BASE_URL}/models?provider=xai&modality=text`,
-      `${AI_POWERED_NGROK_BASE_URL}/models?provider=openrouter&modality=text`
+      'api/ai-powered/health.php?upstream=ngrok',
+      'api/ai-powered/providers.php?upstream=ngrok',
+      'api/ai-powered/models.php?upstream=ngrok&provider=xai&modality=text',
+      'api/ai-powered/models.php?upstream=ngrok&provider=openrouter&modality=text'
     ]));
   });
 

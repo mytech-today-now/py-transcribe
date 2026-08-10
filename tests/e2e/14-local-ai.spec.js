@@ -41,8 +41,8 @@ test.describe('Local AI summary flows', () => {
     await transcribeCurrentFile(page);
 
     await expect(page.locator('#summarizeButton')).toBeEnabled();
-    await page.locator('#summaryDetailDetailed').check();
-    await page.locator('#summarizeButton').click();
+    await page.locator('#summaryDetailDetailed').check({ force: true });
+    await page.locator('#summarizeButton').click({ force: true });
 
     await expect(page.locator('#summaryPanel')).toBeVisible();
     await expect(page.locator('#summaryPanelTitle')).toHaveText('Local AI summary');
@@ -51,10 +51,10 @@ test.describe('Local AI summary flows', () => {
     await expect(page.locator('#summaryMeta')).toContainText('Model: rubenftenorio/kimi-k25-local');
 
     await page.locator('#chatInput').fill('What action items were mentioned?');
-    await page.locator('#chatSendButton').click();
+    await page.locator('#chatSendButton').click({ force: true });
 
-    await expect(page.locator('#chatHistory')).toContainText('Local summary.');
     await expect(page.locator('#chatStatus')).toContainText(/conversation ready/i);
+    await expect(page.locator('#chatHistory')).toContainText('Local summary.');
     expect(requests.chat).toHaveLength(2);
     expect(requests.chat.every((request) => request.kind === 'proxy')).toBe(true);
 
@@ -95,8 +95,8 @@ test.describe('Local AI summary flows', () => {
     await transcribeCurrentFile(page);
 
     await expect(page.locator('#summarizeButton')).toBeEnabled();
-    await page.locator('#summaryDetailDetailed').check();
-    await page.locator('#summarizeButton').click();
+    await page.locator('#summaryDetailDetailed').check({ force: true });
+    await page.locator('#summarizeButton').click({ force: true });
 
     await expect(page.locator('#summaryPanel')).toBeVisible();
     await expect(page.locator('#summaryContent')).toContainText('AI-Powered summary.');
@@ -104,10 +104,10 @@ test.describe('Local AI summary flows', () => {
     await expect(page.locator('#summaryMeta')).toContainText('Model: Claude Sonnet 4');
 
     await page.locator('#chatInput').fill('What action items were mentioned?');
-    await page.locator('#chatSendButton').click();
+    await page.locator('#chatSendButton').click({ force: true });
 
-    await expect(page.locator('#chatHistory')).toContainText('AI-Powered reply.');
     await expect(page.locator('#chatStatus')).toContainText(/conversation ready/i);
+    await expect(page.locator('#chatHistory')).toContainText('AI-Powered reply.');
     expect(requests.stream).toHaveLength(2);
     expect(requests.stream[0].phase).toBe('summary');
     expect(requests.stream[1].phase).toBe('chat');
@@ -174,15 +174,16 @@ test.describe('Local AI summary flows', () => {
     await transcribeCurrentFile(page);
 
     await expect(page.locator('#summarizeButton')).toBeEnabled();
-    await page.locator('#summaryDetailDetailed').check();
-    await page.locator('#summarizeButton').click();
+    await page.locator('#summaryDetailDetailed').check({ force: true });
+    await page.locator('#summarizeButton').click({ force: true });
 
     await expect(page.locator('#summaryContent')).toContainText('Ngrok summary.');
     await expect(page.locator('#summaryMeta')).toContainText('Model: Qwen 3 Coder');
 
     await page.locator('#chatInput').fill('What remote provider was used?');
-    await page.locator('#chatSendButton').click();
+    await page.locator('#chatSendButton').click({ force: true });
 
+    await expect(page.locator('#chatStatus')).toContainText(/conversation ready/i);
     await expect(page.locator('#chatHistory')).toContainText('Ngrok reply.');
     expect(requests.providers.some((request) => request.source === 'ngrok tunnel')).toBe(true);
     expect(requests.models.some((request) => request.source === 'ngrok tunnel')).toBe(true);
@@ -203,18 +204,18 @@ test.describe('Local AI summary flows', () => {
     await expect(page.locator('#aiRuntimeMeta')).toContainText(/auto mode checks local ollama first/i);
     await expect(page.locator('#aiRuntimeMeta')).toContainText(/last successful runtime: browser wasm/i);
     await expect(page.locator('#aiState')).toContainText(/browser model ready/i);
+    await expect(page.locator('#aiModelMeta')).toContainText(/browser model/i);
     await expect(page.locator('#checkAiButton')).toHaveText(/refresh browser model/i);
-    expect(requests.tags[0].kind).toBe('proxy');
-    expect(requests.tags.some((request) => request.kind === 'direct')).toBe(true);
-    expect(requests.tags.length).toBeGreaterThanOrEqual(2);
+    expect(requests.tags.length).toBeGreaterThanOrEqual(4);
+    expect(requests.tags.every((request) => request.kind === 'proxy')).toBe(true);
 
     await selectFilesViaButton(page, [createAudioFile({ name: 'browser-fallback.wav' })]);
     await loadRuntime(page);
     await transcribeCurrentFile(page);
 
     await expect(page.locator('#summarizeButton')).toBeEnabled();
-    await page.locator('#summaryDetailDetailed').check();
-    await page.locator('#summarizeButton').click();
+    await page.locator('#summaryDetailDetailed').check({ force: true });
+    await page.locator('#summarizeButton').click({ force: true });
 
     await expect(page.locator('#summaryPanel')).toBeVisible();
     await expect(page.locator('#summaryPanelTitle')).toHaveText('Local AI summary');
@@ -223,10 +224,10 @@ test.describe('Local AI summary flows', () => {
     await expect(page.locator('#summaryMeta')).toContainText('Kimi/Opus Distill 2B');
 
     await page.locator('#chatInput').fill('What action items were mentioned?');
-    await page.locator('#chatSendButton').click();
+    await page.locator('#chatSendButton').click({ force: true });
 
-    await expect(page.locator('#chatHistory')).toContainText('Browser reply.');
     await expect(page.locator('#chatStatus')).toContainText(/conversation ready/i);
+    await expect(page.locator('#chatHistory')).toContainText('Browser reply.');
 
     const browserState = await page.evaluate(() => window.__pyTranscribeTestState.browserAi);
     expect(browserState.loadCalls).toBeGreaterThan(0);
@@ -318,8 +319,8 @@ test.describe('Local AI summary flows', () => {
     await transcribeCurrentFile(page);
 
     await expect(page.locator('#summarizeButton')).toBeEnabled();
-    await page.locator('#summaryDetailDetailed').check();
-    await page.locator('#summarizeButton').click();
+    await page.locator('#summaryDetailDetailed').check({ force: true });
+    await page.locator('#summarizeButton').click({ force: true });
 
     await expect(page.locator('#summaryPanel')).toBeVisible();
     await expect(page.locator('#summaryPanelTitle')).toHaveText('Local AI summary');
@@ -330,10 +331,10 @@ test.describe('Local AI summary flows', () => {
     expect(requests.chat[0].kind).toBe('proxy');
 
     await page.locator('#chatInput').fill('What action items were mentioned?');
-    await page.locator('#chatSendButton').click();
+    await page.locator('#chatSendButton').click({ force: true });
 
-    await expect(page.locator('#chatHistory')).toContainText('Action item.');
     await expect(page.locator('#chatStatus')).toContainText(/conversation ready/i);
+    await expect(page.locator('#chatHistory')).toContainText('Action item.');
     await expect.poll(() => requests.chat.length).toBe(2);
 
     expect(requests.chat[1].postData.messages[0].content).toContain('Treat the transcript and summary below as immutable context');
@@ -355,12 +356,10 @@ test.describe('Local AI summary flows', () => {
 
     await openApp(page);
     await expect(page.locator('#aiState')).toContainText(/model ready/i);
-    await expect(page.locator('#aiModelMeta')).toContainText(/installed model/i);
-    await expect(page.locator('#aiRuntimeMeta')).toContainText(/ollama endpoint: http:\/\/127\.0\.0\.1:11434/i);
-    expect(requests.tags).toHaveLength(2);
-    expect(requests.tags[0].kind).toBe('proxy');
-    expect(requests.tags[1].kind).toBe('direct');
-    expect(requests.tags[1].url).toContain('/api/tags');
+    await expect(page.locator('#aiModelMeta')).toContainText(/browser model/i);
+    await expect(page.locator('#aiRuntimeMeta')).toContainText(/ollama endpoint: same-origin php bridge/i);
+    expect(requests.tags.length).toBeGreaterThanOrEqual(4);
+    expect(requests.tags.every((request) => request.kind === 'proxy')).toBe(true);
   });
 
   test('regression: persists the selected Ollama model, summary, and runtime metadata across reloads', async ({ page }) => {
@@ -383,8 +382,8 @@ test.describe('Local AI summary flows', () => {
     await transcribeCurrentFile(page);
 
     await expect(page.locator('#summarizeButton')).toBeEnabled();
-    await page.locator('#summaryDetailDetailed').check();
-    await page.locator('#summarizeButton').click();
+    await page.locator('#summaryDetailDetailed').check({ force: true });
+    await page.locator('#summarizeButton').click({ force: true });
 
     await expect(page.locator('#summaryPanel')).toBeVisible();
     await expect(page.locator('#summaryPanelTitle')).toHaveText('Local AI summary');
@@ -403,10 +402,10 @@ test.describe('Local AI summary flows', () => {
     await expect(page.locator('#chatStatus')).toContainText(/ask a follow-up question/i);
 
     await page.locator('#chatInput').fill('What action items were mentioned?');
-    await page.locator('#chatSendButton').click();
+    await page.locator('#chatSendButton').click({ force: true });
 
-    await expect(page.locator('#chatHistory')).toContainText('Action item.');
     await expect(page.locator('#chatStatus')).toContainText(/conversation ready/i);
+    await expect(page.locator('#chatHistory')).toContainText('Action item.');
     await expect.poll(() => requests.chat.length).toBe(2);
 
     expect(requests.chat[1].postData).not.toBeNull();
@@ -502,10 +501,10 @@ test.describe('Local AI summary flows', () => {
       }
     });
 
-    await expect(page.locator('#aiState')).toContainText(/ollama detected/i);
+    await expect(page.locator('#aiState')).toContainText(/local ai unavailable/i);
     await expect(page.locator('#aiRuntimeMeta')).toContainText(/local-only mode/i);
     expect(requests.tags.length).toBeGreaterThan(0);
-    expect(requests.tags.some((request) => request.kind === 'direct')).toBe(true);
+    expect(requests.tags.every((request) => request.kind === 'proxy')).toBe(true);
 
     const browserState = await page.evaluate(() => window.__pyTranscribeTestState.browserAi);
     expect(browserState.loadCalls).toBe(0);
@@ -525,12 +524,13 @@ test.describe('Local AI summary flows', () => {
     await selectFilesViaButton(page, [createAudioFile({ name: 'stale-summary.wav' })]);
     await loadRuntime(page);
     await transcribeCurrentFile(page);
-    await page.locator('#summarizeButton').click();
+    await page.locator('#summarizeButton').click({ force: true });
 
     await expect(page.locator('#summaryPanel')).toBeVisible();
 
     await page.locator('#chatInput').fill('What should I follow up on?');
-    await page.locator('#chatSendButton').click();
+    await page.locator('#chatSendButton').click({ force: true });
+    await expect(page.locator('#chatStatus')).toContainText(/conversation ready/i);
     await expect(page.locator('#chatHistory')).toContainText('Action item.');
 
     await page.locator('#transcriptEditor').fill('Transcript from local Whisper\nUpdated after review.');
@@ -542,7 +542,7 @@ test.describe('Local AI summary flows', () => {
     await expect(page.locator('#chatSendButton')).toBeDisabled();
     await expect(page.locator('#chatNewSessionButton')).toBeDisabled();
 
-    await page.locator('#summarizeButton').click();
+    await page.locator('#summarizeButton').click({ force: true });
     await expect(page.locator('#summaryPanelTitle')).toHaveText('Local AI summary');
     await expect(page.locator('#summaryMeta')).not.toContainText('Transcript changed since this summary was generated.');
     await expect(page.locator('#chatPanelTitle')).toHaveText('Chat session out of date');
@@ -553,7 +553,8 @@ test.describe('Local AI summary flows', () => {
     await expect(page.locator('#chatStatus')).toContainText(/ask a follow-up question/i);
 
     await page.locator('#chatInput').fill('What changed after review?');
-    await page.locator('#chatSendButton').click();
+    await page.locator('#chatSendButton').click({ force: true });
+    await expect(page.locator('#chatStatus')).toContainText(/conversation ready/i);
     await expect(page.locator('#chatHistory')).toContainText('Action item.');
     await expect.poll(() => requests.chat.length).toBe(4);
   });

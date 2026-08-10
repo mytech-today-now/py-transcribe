@@ -4,6 +4,10 @@ declare(strict_types=1);
 const APP_NAME = 'Py Transcribe Studio';
 const APP_PASSWORD_HASH = '';
 const APP_STORAGE_TTL_SECONDS = 86_400;
+const AI_POWERED_DEFAULT_BASE_URL = 'http://127.0.0.1:3001';
+const AI_POWERED_LOCALHOST_BASE_URL = 'http://localhost:3001';
+const AI_POWERED_IPV6_LOOPBACK_BASE_URL = 'http://[::1]:3001';
+const AI_POWERED_NGROK_BASE_URL = 'https://contorted-jarrod-supersecure.ngrok-free.dev';
 
 function app_start_session(): void
 {
@@ -309,6 +313,12 @@ function app_build_config(array $extra = []): array
     ], $extra);
 }
 
+function app_request_upstream_token(): string
+{
+    $raw = (string) ($_GET['upstream'] ?? $_POST['upstream'] ?? '');
+    return strtolower(trim($raw));
+}
+
 function app_proxy_ollama_endpoint(string $endpoint): void
 {
     $endpoint = trim($endpoint);
@@ -350,7 +360,7 @@ function app_proxy_ollama_endpoint(string $endpoint): void
     }
     @ob_implicit_flush(true);
 
-    foreach (app_ollama_target_candidates() as $baseUrl) {
+    foreach (app_ollama_target_candidates(app_request_upstream_token()) as $baseUrl) {
         $candidateTarget = rtrim($baseUrl, '/') . '/api/' . $endpoint;
         if (app_proxy_ollama_endpoint_via_curl($candidateTarget, $method, $requestHeaders, $body, $endpoint)) {
             return;
@@ -362,7 +372,7 @@ function app_proxy_ollama_endpoint(string $endpoint): void
     }
 
     app_text(
-        'Ollama is not running on this machine or the local proxy cannot reach http://127.0.0.1:11434 or http://localhost:11434.',
+        'Ollama is not running on this machine or the same-origin bridge cannot reach the selected upstream.',
         502
     );
 }
@@ -517,8 +527,21 @@ function app_ollama_proxy_content_type(?string $contentType, string $endpoint): 
     return $normalized !== '' ? $normalized : $defaultContentType;
 }
 
-function app_ollama_target_candidates(): array
+function app_ollama_target_candidates(string $upstream = ''): array
 {
+    $normalizedUpstream = strtolower(trim($upstream));
+    if (in_array($normalizedUpstream, ['127.0.0.1', 'localhost', 'ipv6'], true)) {
+        if ($normalizedUpstream === '127.0.0.1') {
+            return ['http://127.0.0.1:11434'];
+        }
+
+        if ($normalizedUpstream === 'localhost') {
+            return ['http://localhost:11434'];
+        }
+
+        return ['http://[::1]:11434'];
+    }
+
     $candidates = [];
     $configured = trim((string) getenv('OLLAMA_BASE_URL'));
     if ($configured !== '' && preg_match('/^[a-z][a-z\d+.-]*:\/\//i', $configured) === 1) {
@@ -577,7 +600,7 @@ function app_proxy_ai_powered_endpoint(string $endpoint): void
     }
     @ob_implicit_flush(true);
 
-    foreach (app_ai_powered_target_candidates() as $baseUrl) {
+    foreach (app_ai_powered_target_candidates(app_request_upstream_token()) as $baseUrl) {
         $candidateTarget = rtrim($baseUrl, '/') . '/api/' . $endpoint;
         if (app_proxy_ai_powered_endpoint_via_curl($candidateTarget, $method, $requestHeaders, $body, $endpoint)) {
             return;
@@ -589,7 +612,7 @@ function app_proxy_ai_powered_endpoint(string $endpoint): void
     }
 
     app_text(
-        'AI-Powered is not running on this machine or the local proxy cannot reach http://127.0.0.1:3001 or http://localhost:3001.',
+        'AI-Powered is not running on this machine or the same-origin bridge cannot reach the selected upstream.',
         502
     );
 }
@@ -744,8 +767,34 @@ function app_ai_powered_proxy_content_type(?string $contentType, string $endpoin
     return $normalized !== '' ? $normalized : $defaultContentType;
 }
 
-function app_ai_powered_target_candidates(): array
+function app_ai_powered_target_candidates(string $upstream = ''): array
 {
+    $normalizedUpstream = strtolower(trim($upstream));
+    if ($normalizedUpstream === 'ngrok') {
+        $configuredRemote = trim((string) getenv('AI_POWERED_NGROK_BASE_URL'));
+        return [
+            $configuredRemote !== '' && preg_match('/^[a-z][a-z\d+.-]*:\/\//i', $configuredRemote) === 1
+                ? rtrim($configuredRemote, '/')
+                : AI_POWERED_NGROK_BASE_URL
+        ];
+    }
+
+    if ($normalizedUpstream === 'local' || $normalizedUpstream === 'proxy') {
+        $normalizedUpstream = '';
+    }
+
+    if ($normalizedUpstream === 'localhost') {
+        return ['http://localhost:3001'];
+    }
+
+    if ($normalizedUpstream === 'ipv6') {
+        return ['http://[::1]:3001'];
+    }
+
+    if ($normalizedUpstream === '127.0.0.1') {
+        return ['http://127.0.0.1:3001'];
+    }
+
     $candidates = [];
     $configured = trim((string) getenv('AI_POWERED_BASE_URL'));
     if ($configured !== '' && preg_match('/^[a-z][a-z\d+.-]*:\/\//i', $configured) === 1) {

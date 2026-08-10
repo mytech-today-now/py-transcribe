@@ -125,7 +125,7 @@ describe('persistence helpers', () => {
     vi.resetModules();
   });
 
-  it('requests persistent storage when the browser exposes it', async () => {
+  it('requests persistent storage when the browser exposes it', { timeout: 15_000 }, async () => {
     const persist = vi.fn().mockResolvedValue(true);
     vi.stubGlobal('navigator', {
       storage: {

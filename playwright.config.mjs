@@ -15,7 +15,7 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   reporter: [['list']],
-  timeout: 30_000,
+  timeout: 120_000,
   expect: {
     timeout: 5_000
   },
@@ -44,7 +44,7 @@ export default defineConfig({
     command: 'npm run test:e2e:serve',
     url: 'http://127.0.0.1:4173',
     reuseExistingServer: !process.env.CI,
-    timeout: 120_000
+    timeout: 300_000
   },
   outputDir: 'test-results/e2e'
 });

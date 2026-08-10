@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="description" content="A browser-first transcription studio for shared PHP hosting." />
+    <title>Py Transcribe Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      window.__TRANSCRIBE_CONFIG__ = window.__TRANSCRIBE_CONFIG__ || {
+        appName: 'Py Transcribe Studio',
+        uploadEndpoint: 'api/upload.php',
+        downloadEndpoint: 'api/download.php',
+        promoUrl: 'https://mytech.today',
+        readmeApiUrl: 'https://api.github.com/repos/mytech-today-now/py-transcribe/readme?ref=main',
+        readmeSourceUrl: 'https://github.com/mytech-today-now/py-transcribe/blob/main/readme.md',
+        csrfToken: '',
+        authRequired: false,
+        storageEnabled: true,
+        localAiAutoDownload: true,
+        localAiRuntimeMode: 'auto',
+        localAiBaseUrl: 'api/ollama',
+        uploadLimitBytes: 16777216,
+        clientLimitBytes: 2684354560
+      };
+    </script>
+    <script type="module" crossorigin src="./assets/index-DxYLycXc.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-BtrDjT2S.css">
+  </head>
+  <body>
+    <div class="ambient ambient-left" aria-hidden="true"></div>
+    <div class="ambient ambient-right" aria-hidden="true"></div>
+
+    <main class="shell">
+      <header class="hero card">
+        <div class="hero-copy">
+          <p class="eyebrow">Shared-hosting edition</p>
+          <h1 id="hero-title">Local Whisper, editable transcripts, lean PHP.</h1>
+          <p id="browserNote" class="lede">Everything stays local unless you enable host backup.</p>
+        </div>
+        <div class="hero-actions" aria-label="Quick actions">
+          <button
+            id="promoButton"
+            class="hero-action hero-action-promo"
+            type="button"
+            aria-haspopup="dialog"
+            aria-controls="promoDialog"
+            title="Open myTech.Today consulting card"
+          >
+            <span class="hero-action-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M7 7h10M7 12h10M7 17h6" />
+                <path d="M17.5 5.5 21 9l-3.5 3.5" />
+              </svg>
+            </span>
+            <span class="hero-action-text">myTech.Today</span>
+            <span class="sr-only">Open myTech.Today consulting card</span>
+          </button>
+          <button
+            id="readmeButton"
+            class="hero-action hero-action-readme"
+            type="button"
+            aria-haspopup="dialog"
+            aria-controls="readmeDialog"
+            title="Open the rendered README"
+          >
+            <span class="hero-action-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M7 4.75h7.25L19 9.5V19a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V5.75a1 1 0 0 1 1-1Z" />
+                <path d="M14.25 4.75V9.5H19" />
+                <path d="M9.5 13h5M9.5 16h5M9.5 10h2.5" />
+              </svg>
+            </span>
+            <span class="hero-action-text">README</span>
+            <span class="sr-only">Open the live rendered README</span>
+          </button>
+        </div>
+      </header>
+
+      <article class="toolbar card" aria-labelledby="runtime-title">
+        <h2 id="runtime-title" class="sr-only">Runtime controls</h2>
+        <div class="toolbar-stack">
+          <div class="toolbar-row toolbar-runtime-row">
+          <button id="loadRuntimeButton" class="button button-primary" type="button">Load Whisper / Python</button>
+          <div class="toolbar-state toolbar-runtime">
+            <span class="toolbar-label">Runtime</span>
+            <strong id="runtimeState">Not loaded</strong>
+          </div>
+          </div>
+
+          <div class="toolbar-row toolbar-copy-row">
+          <label class="toggle toolbar-toggle">
+            <input id="serverCopyToggle" type="checkbox" />
+            <span>Save a local copy</span>
+          </label>
+          </div>
+
+          <div class="toolbar-row toolbar-action-row">
+          <button id="transcribeButton" class="button button-accent" type="button" disabled>Transcribe</button>
+          <button id="cancelButton" class="button button-secondary" type="button" hidden>Cancel</button>
+          </div>
+        </div>
+      </article>
+
+      <footer class="footer card">
+        <details id="eventLog" class="event-log" open>
+          <summary class="event-log-summary">
+            <span class="event-log-title">Event log</span>
+            <strong id="status" role="status" aria-live="polite">Ready. Load Whisper / Python, then choose a file.</strong>
+          </summary>
+          <ol id="eventLogList" class="event-log-list" aria-live="polite" aria-relevant="additions text"></ol>
+        </details>
+        <p class="fine-print">Local model inference runs in the browser. PHP only stores optional backups and serves the shell.</p>
+      </footer>
+
+      <div class="sr-only" aria-hidden="true">
+        <strong id="deviceState">WASM fallback</strong>
+        <strong id="outputState">Waiting</strong>
+        <strong id="runtimeBadge">Idle</strong>
+        <strong id="fileBadge">Waiting</strong>
+        <div id="fileState" hidden></div>
+      </div>
+
+      <section class="grid">
+        <aside class="panel card source-panel">
+          <div class="panel-heading">
+            <h2>Source</h2>
+            <p class="hint">Drop media or record a clip, tune the model, and keep backup storage compact.</p>
+          </div>
+
+          <div class="source-actions">
+            <button id="dropZone" class="source-zone source-drop" type="button" aria-describedby="dropHelp">
+              <span class="source-zone-title">Drop WAV, MP3, MP4, WEBM, or OGG here</span>
+              <span class="source-zone-copy">Click to choose a file from this device, or drag one in.</span>
+            </button>
+
+            <div class="source-zone source-record">
+              <button id="recordButton" class="button button-secondary source-record-button" type="button" aria-pressed="false">Record Mic</button>
+              <p id="recordingState" class="recording-state" role="status" aria-live="polite">Mic idle</p>
+              <div id="recordingPreview" class="recording-preview" hidden>
+                <audio id="recordingPlayer" class="recording-player" controls preload="metadata" aria-label="Recorded microphone clip"></audio>
+                <p class="hint">Review the clip before transcribing it.</p>
+              </div>
+            </div>
+          </div>
+          <p id="dropHelp" class="sr-only">Press Enter or Space to open a file picker, or drag and drop media here.</p>
+          <input id="fileInput" type="file" accept="audio/*,.wav,.mp3,.m4a,.webm,.ogg,.flac,.aac,.mp4,.mov" hidden />
+
+          <div class="field">
+            <label for="modelSelect">Whisper model</label>
+            <select id="modelSelect"></select>
+            <p id="runtimeHint" class="hint">Fastest option for English audio.</p>
+          </div>
+
+          <div class="field split">
+            <div>
+              <label for="taskSelect">Task</label>
+              <select id="taskSelect">
+                <option value="transcribe">Transcribe</option>
+                <option value="translate">Translate to English</option>
+              </select>
+            </div>
+            <div>
+              <label for="languageSelect">Language</label>
+              <select id="languageSelect"></select>
+            </div>
+          </div>
+
+          <div class="field switches">
+            <label class="toggle">
+              <input id="cleanupToggle" type="checkbox" checked />
+              <span>Cleanup punctuation</span>
+            </label>
+            <label class="toggle">
+              <input id="timestampsToggle" type="checkbox" checked />
+              <span>Show timestamps</span>
+            </label>
+            <label class="toggle">
+              <input id="speakerToggle" type="checkbox" />
+              <span>Speaker labels</span>
+            </label>
+          </div>
+
+          <div id="speakerNames" class="field speaker-names" hidden>
+            <div>
+              <label for="speakerOne">Speaker 1</label>
+              <input id="speakerOne" type="text" value="Speaker 1" />
+            </div>
+            <div>
+              <label for="speakerTwo">Speaker 2</label>
+              <input id="speakerTwo" type="text" value="Speaker 2" />
+            </div>
+          </div>
+
+          <div class="field action-row">
+            <button id="dictateButton" class="button button-secondary" type="button">Dictate Mic</button>
+          </div>
+
+          <div class="meta-stack">
+            <p id="fileSummary" class="summary">No file selected yet.</p>
+            <p>Source: <strong id="sourceValue">waiting</strong></p>
+            <p>Runtime detail: <strong id="runtimeDetail">Whisper is not loaded yet.</strong></p>
+            <p>Host storage: <strong id="serverBackupState">Host backup off</strong></p>
+          </div>
+        </aside>
+
+        <section class="panel card transcript-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Transcript</h2>
+              <p class="hint">Edit the transcript, then copy or export it when it’s ready.</p>
+            </div>
+            <button id="copyButton" class="button button-secondary" type="button">Copy transcript</button>
+          </div>
+
+          <div class="download-row download-grid">
+            <button id="downloadTxtButton" class="button button-secondary" type="button" disabled>Download transcript.txt</button>
+            <button id="downloadSrtButton" class="button button-secondary" type="button" disabled>Download transcript.srt</button>
+            <button id="downloadVttButton" class="button button-secondary" type="button" disabled>Download transcript.vtt</button>
+            <button id="downloadZipButton" class="button button-accent" type="button" disabled>Download transcript.zip</button>
+          </div>
+
+          <section class="local-ai-panel" aria-labelledby="localAiTitle">
+            <div class="panel-header local-ai-header">
+              <div>
+                <h3 id="localAiTitle">Local AI summary</h3>
+                <p class="hint">Auto mode checks Ollama first, then falls back to the browser WASM model cache when needed.</p>
+              </div>
+              <div class="local-ai-actions">
+                <button id="checkAiButton" class="button button-secondary" type="button">Download latest Kimi model</button>
+                <button id="summarizeButton" class="button button-accent" type="button" disabled>Summarize transcript</button>
+                <button id="cancelAiButton" class="button button-secondary" type="button" hidden>Cancel</button>
+              </div>
+            </div>
+
+            <div class="local-ai-status">
+              <p class="local-ai-state"><strong id="aiState">Not checked yet</strong></p>
+              <p id="aiDetail" class="hint">Check Ollama first, or switch to browser mode for the cached WASM model.</p>
+              <div id="aiProgress" class="local-ai-progress" hidden>
+                <progress id="aiProgressBar" max="100" value="0"></progress>
+                <p id="aiProgressText" class="local-ai-progress-text">Downloading Kimi model...</p>
+              </div>
+            </div>
+
+            <div class="field local-ai-runtime-field">
+              <label for="aiRuntimeSelect">Runtime mode</label>
+              <select id="aiRuntimeSelect">
+                <option value="auto">Auto - Ollama first, browser fallback</option>
+                <option value="local">Local only - Ollama</option>
+                <option value="ai-powered">AI-Powered providers</option>
+                <option value="browser">Browser only - WASM cache</option>
+              </select>
+              <p id="aiRuntimeMeta" class="hint">Auto mode checks local Ollama first, then falls back to the browser runtime if needed.</p>
+            </div>
+
+            <div class="field local-ai-model-field">
+              <label id="aiModelLabel" for="aiModelSelect">Local AI model</label>
+              <select id="aiModelSelect"></select>
+              <p id="aiModelMeta" class="hint">Choose an installed model or download the latest Kimi variant.</p>
+            </div>
+
+            <fieldset class="field summary-detail-group">
+              <legend>Summary detail</legend>
+              <div class="summary-detail-options">
+                <label class="summary-detail-option">
+                  <input id="summaryDetailBrief" name="summaryDetail" type="radio" value="brief" />
+                  <span>Brief</span>
+                </label>
+                <label class="summary-detail-option">
+                  <input id="summaryDetailStandard" name="summaryDetail" type="radio" value="standard" />
+                  <span>Standard</span>
+                </label>
+                <label class="summary-detail-option">
+                  <input id="summaryDetailDetailed" name="summaryDetail" type="radio" value="detailed" />
+                  <span>Detailed</span>
+                </label>
+              </div>
+            </fieldset>
+
+            <section id="summaryPanel" class="summary-panel" hidden aria-live="polite" aria-atomic="true">
+              <div class="summary-panel-header">
+                <div>
+                  <p class="eyebrow">Generated locally</p>
+                  <h4 id="summaryPanelTitle">Local AI summary</h4>
+                </div>
+                <p id="summaryMeta" class="summary-meta"></p>
+              </div>
+              <div id="summaryContent" class="summary-content" tabindex="0">No summary yet.</div>
+              <div class="summary-panel-actions">
+                <button id="summaryCopyButton" class="button button-secondary" type="button">Copy summary</button>
+                <button id="summaryExpandButton" class="button button-secondary" type="button">Expand</button>
+                <button id="summaryDismissButton" class="button button-secondary" type="button">Dismiss summary</button>
+              </div>
+            </section>
+
+            <section id="chatPanel" class="chat-panel" hidden aria-labelledby="chatPanelTitle">
+              <div class="chat-panel-header">
+                <div>
+                  <p class="eyebrow">Context aware</p>
+                  <h4 id="chatPanelTitle">Local transcript chat</h4>
+                </div>
+                <p id="chatMeta" class="summary-meta">Add a transcript before chatting.</p>
+              </div>
+              <p id="chatStatus" class="chat-status" role="status" aria-live="polite">Add a transcript to start chatting.</p>
+              <ol id="chatHistory" class="chat-history" aria-live="polite" aria-atomic="false"></ol>
+              <form id="chatForm" class="chat-compose">
+                <label for="chatInput" class="sr-only">Ask a follow-up question</label>
+                <textarea id="chatInput" class="chat-input" rows="3" placeholder="Ask about action items, decisions, or missing context."></textarea>
+                <div class="chat-actions">
+                  <button id="chatSendButton" class="button button-accent" type="submit">Send</button>
+                  <button id="chatNewSessionButton" class="button button-secondary" type="button">Start new session</button>
+                  <button id="chatClearButton" class="button button-secondary" type="button">Clear chat</button>
+                </div>
+              </form>
+            </section>
+          </section>
+
+          <div class="transcript-rows">
+            <div class="transcript-row">
+              <label for="transcriptPreview" class="transcript-label">Plain transcript</label>
+              <pre id="transcriptPreview" class="transcript-preview">No transcript yet.</pre>
+            </div>
+
+            <div class="transcript-row">
+              <label for="transcriptEditor" class="transcript-label">Editable transcript</label>
+              <textarea id="transcriptEditor" class="transcript-editor" rows="10" placeholder="Your transcript appears here. You can edit it before copying or exporting."></textarea>
+            </div>
+
+            <div class="transcript-row">
+              <label for="timedPreview" class="transcript-label">Timestamped preview</label>
+              <pre id="timedPreview" class="timed-preview">No transcript yet.</pre>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <dialog id="promoDialog" class="sheet-dialog promo-dialog" aria-labelledby="promoTitle">
+      <div class="sheet-dialog-shell">
+        <div class="sheet-dialog-header">
+          <div class="sheet-dialog-heading">
+            <p class="eyebrow">Midwest IT consulting</p>
+            <h2 id="promoTitle">Need a sharper path to launch?</h2>
+          </div>
+          <form method="dialog">
+            <button class="sheet-dialog-close" type="submit" aria-label="Close myTech.Today card">
+              <span aria-hidden="true">×</span>
+            </button>
+          </form>
+        </div>
+
+        <div class="promo-copy">
+          <p class="promo-lede">
+            myTech.Today helps Midwest teams in Omaha turn messy deployment constraints into practical, shippable web solutions.
+          </p>
+
+          <div class="promo-funnel" aria-label="Consulting funnel">
+            <section class="promo-step">
+              <span class="promo-step-kicker">1. Discover</span>
+              <p>See how browser-first apps, automation, and shared-hosting constraints can fit together cleanly.</p>
+            </section>
+            <section class="promo-step">
+              <span class="promo-step-kicker">2. Clarify</span>
+              <p>Bring the one deployment or workflow issue that keeps slowing the team down.</p>
+            </section>
+            <section class="promo-step">
+              <span class="promo-step-kicker">3. Act</span>
+              <p>Visit myTech.Today for more info and a straightforward next step.</p>
+            </section>
+          </div>
+        </div>
+
+        <div class="sheet-dialog-footer promo-actions">
+          <a class="button button-accent" href="https://mytech.today" target="_blank" rel="noopener noreferrer">Visit myTech.Today</a>
+          <a class="button button-secondary" href="https://mytech.today" target="_blank" rel="noopener noreferrer">Learn more</a>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="readmeDialog" class="sheet-dialog readme-dialog" aria-labelledby="readmeTitle" aria-describedby="readmeStatus">
+      <div class="sheet-dialog-shell readme-shell">
+        <div class="sheet-dialog-header">
+          <div class="sheet-dialog-heading">
+            <p class="eyebrow">Live README</p>
+            <h2 id="readmeTitle">Rendered README</h2>
+          </div>
+          <form method="dialog">
+            <button class="sheet-dialog-close" type="submit" aria-label="Close README viewer">
+              <span aria-hidden="true">×</span>
+            </button>
+          </form>
+        </div>
+
+        <p id="readmeStatus" class="readme-status">Loading the rendered README from GitHub...</p>
+        <article id="readmeContent" class="readme-content markdown-body" hidden></article>
+
+        <div class="sheet-dialog-footer readme-actions">
+          <a class="button button-secondary" href="https://github.com/mytech-today-now/py-transcribe/blob/main/readme.md" target="_blank" rel="noopener noreferrer">Open source README</a>
+        </div>
+      </div>
+    </dialog>
+  </body>
+</html>

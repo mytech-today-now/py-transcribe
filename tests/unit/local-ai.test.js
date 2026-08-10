@@ -76,7 +76,7 @@ describe('local AI helpers', () => {
 
     expect(result.reply).toBe('First reply');
     expect(requests).toHaveLength(1);
-    expect(requests[0].url).toContain('/api/chat');
+    expect(requests[0].url).toContain('api/ollama/chat.php');
     expect(requests[0].body.messages[0].role).toBe('system');
     expect(requests[0].body.messages[1].content).toBe('Earlier question');
     expect(requests[0].body.messages[2].content).toBe('Earlier answer');
@@ -84,8 +84,8 @@ describe('local AI helpers', () => {
   });
 
   it('builds direct and same-origin Ollama request URLs', async () => {
-    expect(buildOllamaApiUrl('http://127.0.0.1:11434', 'tags')).toBe('http://127.0.0.1:11434/api/tags');
-    expect(buildOllamaApiUrl('http://localhost:11434', 'tags')).toBe('http://localhost:11434/api/tags');
+    expect(buildOllamaApiUrl('http://127.0.0.1:11434', 'tags')).toBe('api/ollama/tags.php?upstream=127.0.0.1');
+    expect(buildOllamaApiUrl('http://localhost:11434', 'tags')).toBe('api/ollama/tags.php?upstream=localhost');
     expect(buildOllamaApiUrl('api/ollama', 'chat')).toBe('api/ollama/chat.php');
 
     const requests = [];
@@ -132,6 +132,15 @@ describe('local AI helpers', () => {
       fetchImpl: async (url) => {
         requests.push(url);
 
+        if (String(url).startsWith('api/ollama/tags.php?upstream=ipv6')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ models: [{ name: 'demo-model' }] }),
+            text: async () => ''
+          };
+        }
+
         if (String(url).startsWith('api/ollama')) {
           return {
             ok: false,
@@ -140,20 +149,7 @@ describe('local AI helpers', () => {
           };
         }
 
-        if (String(url).startsWith('http://127.0.0.1:11434')) {
-          throw new Error('Failed to fetch');
-        }
-
-        if (String(url).startsWith('http://localhost:11434')) {
-          throw new Error('Failed to fetch');
-        }
-
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ models: [{ name: 'demo-model' }] }),
-          text: async () => ''
-        };
+        throw new Error(`Unexpected request: ${url}`);
       }
     });
 
@@ -161,9 +157,9 @@ describe('local AI helpers', () => {
     expect(result.models).toEqual([{ name: 'demo-model' }]);
     expect(requests).toEqual([
       'api/ollama/tags.php',
-      'http://127.0.0.1:11434/api/tags',
-      'http://localhost:11434/api/tags',
-      'http://[::1]:11434/api/tags'
+      'api/ollama/tags.php?upstream=127.0.0.1',
+      'api/ollama/tags.php?upstream=localhost',
+      'api/ollama/tags.php?upstream=ipv6'
     ]);
   });
 
@@ -280,7 +276,7 @@ describe('local AI helpers', () => {
 
   it('formats actionable local AI error messages for summary, pull, and chat phases', () => {
     expect(describeLocalAiError(new Error('AbortError'), { phase: 'summary' })).toBe('Summarization cancelled.');
-    expect(describeLocalAiError(new Error('Failed to fetch'), { phase: 'chat' })).toContain('Ollama is not running');
+    expect(describeLocalAiError(new Error('Failed to fetch'), { phase: 'chat' })).toContain('same-origin bridge');
     expect(describeLocalAiError(new Error('download failed'), { phase: 'pull' })).toContain('Could not finish downloading');
   });
 });

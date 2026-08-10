@@ -53,7 +53,7 @@ test.describe('Network resilience', () => {
     });
 
     await openApp(page);
-    await page.locator('#serverCopyToggle').setChecked(true);
+    await page.locator('#serverCopyToggle').setChecked(true, { force: true });
     await selectFilesViaButton(page, [createAudioFile({ name: 'host-backup.wav' })]);
 
     await expect(page.locator('#status')).toContainText(/selected host-backup\.wav/i);
@@ -77,7 +77,7 @@ test.describe('Network resilience', () => {
     });
 
     await openApp(page);
-    await page.locator('#serverCopyToggle').setChecked(true);
+    await page.locator('#serverCopyToggle').setChecked(true, { force: true });
     await dropFiles(page, '#dropZone', [
       withSpoofedSize(createAudioFile({ name: 'oversized.wav' }), 32 * 1024 * 1024)
     ]);

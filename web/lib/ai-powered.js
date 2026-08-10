@@ -99,11 +99,37 @@ export function buildAiPoweredApiUrl(baseUrl = AI_POWERED_PROXY_BASE_URL, endpoi
   }
 
   if (/^[a-z][a-z\d+.-]*:\/\//i.test(normalizedBaseUrl)) {
-    // Absolute ai-powered origins expose top-level routes like /health and /models.
-    return `${normalizedBaseUrl}/${normalizedEndpoint}`;
+    const upstream = deriveAiPoweredUpstreamToken(normalizedBaseUrl);
+    const proxyUrl = `${AI_POWERED_PROXY_BASE_URL}/${normalizedEndpoint}.php`;
+    return upstream ? `${proxyUrl}?upstream=${encodeURIComponent(upstream)}` : proxyUrl;
   }
 
   return `${normalizedBaseUrl}/${normalizedEndpoint}.php`;
+}
+
+function deriveAiPoweredUpstreamToken(baseUrl) {
+  const normalized = normalizeAiPoweredBaseUrl(baseUrl);
+  if (!normalized || normalized === AI_POWERED_PROXY_BASE_URL) {
+    return '';
+  }
+
+  if (normalized === AI_POWERED_DEFAULT_BASE_URL) {
+    return 'local';
+  }
+
+  if (normalized === AI_POWERED_LOCALHOST_BASE_URL) {
+    return 'localhost';
+  }
+
+  if (normalized === AI_POWERED_IPV6_LOOPBACK_BASE_URL) {
+    return 'ipv6';
+  }
+
+  if (normalized === AI_POWERED_NGROK_BASE_URL) {
+    return 'ngrok';
+  }
+
+  return '';
 }
 
 export function normalizeAiPoweredModel(model) {
@@ -374,7 +400,9 @@ export async function fetchAiPoweredModels({
   if (modality) {
     query.set('modality', String(modality).trim());
   }
-  const requestUrl = query.size > 0 ? `${url}?${query.toString()}` : url;
+  const requestUrl = query.size > 0
+    ? `${url}${String(url).includes('?') ? '&' : '?'}${query.toString()}`
+    : url;
 
   const response = await fetchImpl(requestUrl, {
     method: 'GET',
@@ -513,7 +541,20 @@ export async function fetchAiPoweredCatalogsFromCandidates({
 } = {}) {
   const attempts = [];
   const catalogs = [];
-  const probes = uniqueBaseUrls(Array.isArray(baseUrls) ? baseUrls : [baseUrls]).map(async (candidateBaseUrl) => {
+  const seenSourceKeys = new Set();
+  const candidateBaseUrls = [];
+
+  for (const candidateBaseUrl of uniqueBaseUrls(Array.isArray(baseUrls) ? baseUrls : [baseUrls])) {
+    const sourceKey = resolveAiPoweredCatalogSourceKey(candidateBaseUrl);
+    if (seenSourceKeys.has(sourceKey)) {
+      continue;
+    }
+
+    seenSourceKeys.add(sourceKey);
+    candidateBaseUrls.push(candidateBaseUrl);
+  }
+
+  const probes = candidateBaseUrls.map(async (candidateBaseUrl) => {
     try {
       const catalog = await fetchAiPoweredCatalogForBaseUrl({
         baseUrl: candidateBaseUrl,
@@ -767,11 +808,11 @@ export function describeAiPoweredError(error, {
   }
 
   if (lowered.includes('cors') || lowered.includes('origin')) {
-    return `The browser blocked access to AI-Powered at ${baseUrl}. If the local ai-powered server is running, allow https://mytech.today in its browser origins or keep its browser-safe proxy mode enabled, then click Retry.`;
+    return `The browser blocked a direct AI-Powered request. Keep the same-origin PHP bridge enabled so the production origin can reach local and ngrok providers without CORS errors, then click Retry.`;
   }
 
   if (lowered.includes('failed to fetch') || lowered.includes('networkerror') || /\bload failed\b/i.test(lowered)) {
-    return `Could not reach AI-Powered at ${baseUrl}. Start the local ai-powered server on this machine, then click Retry.`;
+    return `Could not reach AI-Powered at ${baseUrl}. Start the local ai-powered server or verify the ngrok tunnel, then click Retry.`;
   }
 
   if (phase === 'summary') {
@@ -952,6 +993,27 @@ function uniqueBaseUrls(values) {
   }
 
   return urls;
+}
+
+function resolveAiPoweredCatalogSourceKey(baseUrl) {
+  const normalized = normalizeAiPoweredBaseUrl(baseUrl);
+  if (!normalized || normalized === AI_POWERED_PROXY_BASE_URL) {
+    return 'local';
+  }
+
+  if (
+    normalized === AI_POWERED_DEFAULT_BASE_URL
+    || normalized === AI_POWERED_LOCALHOST_BASE_URL
+    || normalized === AI_POWERED_IPV6_LOOPBACK_BASE_URL
+  ) {
+    return 'local';
+  }
+
+  if (normalized === AI_POWERED_NGROK_BASE_URL) {
+    return 'ngrok';
+  }
+
+  return normalized.toLowerCase();
 }
 
 function abortError() {
