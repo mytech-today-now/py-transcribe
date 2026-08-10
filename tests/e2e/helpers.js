@@ -347,24 +347,43 @@ export async function installAiPoweredRoutes(page, {
     { id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4', capabilities: ['text', 'structured'] },
     { id: 'openai/gpt-4.1-mini', name: 'GPT-4.1 Mini', capabilities: ['text'] }
   ],
+  ngrokModels = [],
   summaryChunks = [
     'AI-Powered summary.',
     '\n- Main idea.',
+    '\n- Action item.'
+  ],
+  ngrokSummaryChunks = [
+    'Ngrok summary.',
+    '\n- Remote provider.',
     '\n- Action item.'
   ],
   chatChunks = [
     'AI-Powered reply.',
     '\n- Action item.'
   ],
+  ngrokChatChunks = [
+    'Ngrok reply.',
+    '\n- Remote provider.',
+    '\n- Action item.'
+  ],
   healthDelayMs = 0,
   modelsDelayMs = 0,
   streamDelayMs = 0,
+  ngrokHealthDelayMs = 0,
+  ngrokModelsDelayMs = 0,
+  ngrokStreamDelayMs = 0,
   healthStatus = 200,
   modelsStatus = 200,
-  streamStatus = 200
+  streamStatus = 200,
+  ngrokHealthStatus = 502,
+  ngrokModelsStatus = 502,
+  ngrokStreamStatus = 502,
+  allowLoopbackDirect = false
 } = {}) {
   const requests = {
     health: [],
+    providers: [],
     models: [],
     stream: []
   };
@@ -411,12 +430,163 @@ export async function installAiPoweredRoutes(page, {
   };
 
   const buildStreamBody = (chunks) => `${chunks.map((chunk) => `data: ${JSON.stringify({ text: chunk })}`).join('\n')}\n`;
+  const normalizeText = (value) => String(value || '').trim();
+  const titleCase = (value) => normalizeText(value)
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+  const inferProviderId = (model) => {
+    const explicit = normalizeText(model?.providerId || model?.provider || '');
+    if (explicit) {
+      return explicit;
+    }
 
-  await page.route(/\/api\/ai-powered\/health\.php(?:\?.*)?$/i, async (route, request) => {
+    const modelId = normalizeText(model?.id || '');
+    return modelId.includes('/') ? normalizeText(modelId.split('/')[0]) : 'default';
+  };
+  const inferProviderName = (providerId, model) => normalizeText(model?.providerName || model?.provider_name || titleCase(providerId || 'Provider')) || 'Provider';
+
+  const normalizeCatalogModels = (inputModels, { baseUrl, endpointLabel }) => {
+    return (Array.isArray(inputModels) ? inputModels : []).map((model) => {
+      const providerId = inferProviderId(model);
+      const providerName = inferProviderName(providerId, model);
+      const capabilities = Array.isArray(model?.capabilities)
+        ? [...new Set(model.capabilities.map((entry) => normalizeText(entry).toLowerCase()).filter(Boolean))]
+        : [];
+
+      return {
+        ...model,
+        id: normalizeText(model?.id || ''),
+        name: normalizeText(model?.name || model?.id || ''),
+        capabilities,
+        providerId,
+        providerName,
+        baseUrl,
+        endpointLabel,
+        selectionKey: `${baseUrl.toLowerCase()}|||${providerId.toLowerCase()}|||${normalizeText(model?.id || '').toLowerCase()}`
+      };
+    }).filter((model) => model.id && model.name);
+  };
+
+  const buildProviders = (catalogModels) => {
+    const groups = new Map();
+
+    for (const model of catalogModels) {
+      const providerId = normalizeText(model.providerId || inferProviderId(model)).toLowerCase();
+      if (!providerId) {
+        continue;
+      }
+
+      const providerName = normalizeText(model.providerName || inferProviderName(providerId, model));
+      const entry = groups.get(providerId) || {
+        id: providerId,
+        name: providerName,
+        active: true,
+        modalities: [],
+        inputModalities: []
+      };
+
+      for (const capability of model.capabilities || ['text']) {
+        if (!entry.modalities.includes(capability)) {
+          entry.modalities.push(capability);
+        }
+      }
+
+      groups.set(providerId, entry);
+    }
+
+    return Array.from(groups.values()).sort((left, right) => left.name.localeCompare(right.name));
+  };
+
+  const filterModels = (catalogModels, { providerId = '', modality = 'text' } = {}) => {
+    const normalizedProviderId = normalizeText(providerId).toLowerCase();
+    const normalizedModality = normalizeText(modality).toLowerCase();
+
+    return catalogModels.filter((model) => {
+      const modelProviderId = normalizeText(model.providerId || inferProviderId(model)).toLowerCase();
+      if (normalizedProviderId && modelProviderId !== normalizedProviderId) {
+        return false;
+      }
+
+      if (!normalizedModality) {
+        return true;
+      }
+
+      if (!Array.isArray(model.capabilities) || model.capabilities.length === 0) {
+        return normalizedModality === 'text';
+      }
+
+      return model.capabilities.includes(normalizedModality);
+    });
+  };
+
+  const buildCatalog = ({
+    baseUrl,
+    endpointLabel,
+    healthStatus: currentHealthStatus,
+    modelsStatus: currentModelsStatus,
+    streamStatus: currentStreamStatus,
+    healthDelayMs: currentHealthDelayMs,
+    modelsDelayMs: currentModelsDelayMs,
+    streamDelayMs: currentStreamDelayMs,
+    models: currentModels,
+    summaryChunks: currentSummaryChunks,
+    chatChunks: currentChatChunks
+  }) => {
+    const catalogModels = normalizeCatalogModels(currentModels, { baseUrl, endpointLabel });
+    return {
+      baseUrl,
+      endpointLabel,
+      healthStatus: currentHealthStatus,
+      modelsStatus: currentModelsStatus,
+      streamStatus: currentStreamStatus,
+      healthDelayMs: currentHealthDelayMs,
+      modelsDelayMs: currentModelsDelayMs,
+      streamDelayMs: currentStreamDelayMs,
+      providers: buildProviders(catalogModels),
+      models: catalogModels,
+      summaryChunks: Array.isArray(currentSummaryChunks) && currentSummaryChunks.length ? currentSummaryChunks : summaryChunks,
+      chatChunks: Array.isArray(currentChatChunks) && currentChatChunks.length ? currentChatChunks : chatChunks
+    };
+  };
+
+  const sameOriginCatalog = buildCatalog({
+    baseUrl: 'api/ai-powered',
+    endpointLabel: 'same-origin bridge',
+    healthStatus,
+    modelsStatus,
+    streamStatus,
+    healthDelayMs,
+    modelsDelayMs,
+    streamDelayMs,
+    models,
+    summaryChunks,
+    chatChunks
+  });
+
+  const ngrokCatalog = buildCatalog({
+    baseUrl: 'https://contorted-jarrod-supersecure.ngrok-free.dev',
+    endpointLabel: 'ngrok tunnel',
+    healthStatus: ngrokHealthStatus,
+    modelsStatus: ngrokModelsStatus,
+    streamStatus: ngrokStreamStatus,
+    healthDelayMs: ngrokHealthDelayMs,
+    modelsDelayMs: ngrokModelsDelayMs,
+    streamDelayMs: ngrokStreamDelayMs,
+    models: ngrokModels,
+    summaryChunks: ngrokSummaryChunks,
+    chatChunks: ngrokChatChunks
+  });
+
+  const proxyRoutePattern = /\/api\/ai-powered\/(health|providers|models|stream)\.php(?:\?.*)?$/i;
+  const directRoutePattern = /(?:\/api)?\/(health|providers|models|stream)(?:\?.*)?$/i;
+
+  const handleHealth = async (route, request, catalog, kind) => {
     requests.health.push({
       method: request.method(),
       url: request.url(),
-      kind: 'proxy'
+      kind,
+      source: catalog.endpointLabel
     });
 
     if (request.method() === 'OPTIONS') {
@@ -424,29 +594,31 @@ export async function installAiPoweredRoutes(page, {
       return;
     }
 
-    if (healthDelayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, healthDelayMs));
+    if (catalog.healthDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, catalog.healthDelayMs));
     }
 
-    if (healthStatus !== 200) {
+    if (catalog.healthStatus !== 200) {
       await fulfillJson(route, {
         ok: false,
         error: 'AI-Powered bridge unavailable.'
-      }, jsonHeaders, healthStatus);
+      }, jsonHeaders, catalog.healthStatus);
       return;
     }
 
     await fulfillJson(route, {
       status: 'ok',
-      service: 'ai-powered'
+      service: 'ai-powered',
+      source: catalog.endpointLabel
     });
-  });
+  };
 
-  await page.route(/\/api\/ai-powered\/models\.php(?:\?.*)?$/i, async (route, request) => {
-    requests.models.push({
+  const handleProviders = async (route, request, catalog, kind) => {
+    requests.providers.push({
       method: request.method(),
       url: request.url(),
-      kind: 'proxy'
+      kind,
+      source: catalog.endpointLabel
     });
 
     if (request.method() === 'OPTIONS') {
@@ -454,22 +626,51 @@ export async function installAiPoweredRoutes(page, {
       return;
     }
 
-    if (modelsDelayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, modelsDelayMs));
-    }
-
-    if (modelsStatus !== 200) {
+    if (catalog.healthStatus !== 200) {
       await fulfillJson(route, {
         ok: false,
         error: 'AI-Powered bridge unavailable.'
-      }, jsonHeaders, modelsStatus);
+      }, jsonHeaders, catalog.healthStatus);
       return;
     }
 
-    await fulfillJson(route, models);
-  });
+    await fulfillJson(route, catalog.providers);
+  };
 
-  await page.route(/\/api\/ai-powered\/stream\.php(?:\?.*)?$/i, async (route, request) => {
+  const handleModels = async (route, request, catalog, kind) => {
+    const parsed = new URL(request.url());
+    const providerId = parsed.searchParams.get('provider') || '';
+    const modality = parsed.searchParams.get('modality') || 'text';
+    requests.models.push({
+      method: request.method(),
+      url: request.url(),
+      kind,
+      source: catalog.endpointLabel,
+      providerId,
+      modality
+    });
+
+    if (request.method() === 'OPTIONS') {
+      await fulfillPreflight(route);
+      return;
+    }
+
+    if (catalog.modelsDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, catalog.modelsDelayMs));
+    }
+
+    if (catalog.modelsStatus !== 200) {
+      await fulfillJson(route, {
+        ok: false,
+        error: 'AI-Powered bridge unavailable.'
+      }, jsonHeaders, catalog.modelsStatus);
+      return;
+    }
+
+    await fulfillJson(route, filterModels(catalog.models, { providerId, modality }));
+  };
+
+  const handleStream = async (route, request, catalog, kind) => {
     const payload = request.postDataJSON?.() ?? null;
     const prompt = String(payload?.prompt || '');
     const phase = /recent conversation:|transcript summary:/i.test(prompt) || requests.stream.length > 0
@@ -478,7 +679,8 @@ export async function installAiPoweredRoutes(page, {
     requests.stream.push({
       method: request.method(),
       url: request.url(),
-      kind: 'proxy',
+      kind,
+      source: catalog.endpointLabel,
       phase,
       postData: payload
     });
@@ -488,16 +690,81 @@ export async function installAiPoweredRoutes(page, {
       return;
     }
 
-    if (streamDelayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, streamDelayMs));
+    if (catalog.streamDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, catalog.streamDelayMs));
     }
 
-    if (streamStatus !== 200) {
-      await fulfillText(route, 'AI-Powered stream unavailable.', textHeaders, streamStatus);
+    if (catalog.streamStatus !== 200) {
+      await fulfillText(route, 'AI-Powered stream unavailable.', textHeaders, catalog.streamStatus);
       return;
     }
 
-    await fulfillText(route, buildStreamBody(phase === 'chat' ? chatChunks : summaryChunks));
+    await fulfillText(route, buildStreamBody(phase === 'chat' ? catalog.chatChunks : catalog.summaryChunks));
+  };
+
+  await page.route(proxyRoutePattern, async (route, request) => {
+    const catalog = sameOriginCatalog;
+    const endpoint = new URL(request.url()).pathname.split('/').pop() || '';
+
+    if (endpoint.includes('health')) {
+      await handleHealth(route, request, catalog, 'proxy');
+      return;
+    }
+
+    if (endpoint.includes('providers')) {
+      await handleProviders(route, request, catalog, 'proxy');
+      return;
+    }
+
+    if (endpoint.includes('models')) {
+      await handleModels(route, request, catalog, 'proxy');
+      return;
+    }
+
+    await handleStream(route, request, catalog, 'proxy');
+  });
+
+  await page.route(directRoutePattern, async (route, request) => {
+    const parsed = new URL(request.url());
+    const isNgrok = parsed.hostname.includes('ngrok-free.dev');
+    const isLoopback = ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(parsed.hostname);
+    const catalog = isNgrok ? ngrokCatalog : sameOriginCatalog;
+    const endpoint = new URL(request.url()).pathname.split('/').pop() || '';
+
+    if (isLoopback && !allowLoopbackDirect) {
+      requests.health.push({
+        method: request.method(),
+        url: request.url(),
+        kind: 'direct',
+        source: 'loopback'
+      });
+      await route.fulfill({
+        status: 502,
+        headers: jsonHeaders,
+        body: JSON.stringify({
+          ok: false,
+          error: 'Direct loopback access is disabled in this test harness.'
+        })
+      });
+      return;
+    }
+
+    if (endpoint.includes('health')) {
+      await handleHealth(route, request, catalog, 'direct');
+      return;
+    }
+
+    if (endpoint.includes('providers')) {
+      await handleProviders(route, request, catalog, 'direct');
+      return;
+    }
+
+    if (endpoint.includes('models')) {
+      await handleModels(route, request, catalog, 'direct');
+      return;
+    }
+
+    await handleStream(route, request, catalog, 'direct');
   });
 
   return requests;

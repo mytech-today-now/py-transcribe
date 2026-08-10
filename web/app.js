@@ -28,12 +28,13 @@ import {
   AI_POWERED_PROXY_BASE_URL,
   AI_POWERED_STATUS_MESSAGES,
   chatWithAiPowered,
+  buildAiPoweredSelectionKey,
   describeAiPoweredError,
-  fetchAiPoweredModels,
-  fetchAiPoweredModelsFromCandidates,
+  fetchAiPoweredCatalogsFromCandidates,
   formatAiPoweredModelLabel,
   normalizeAiPoweredBaseUrl,
   normalizeAiPoweredModel,
+  parseAiPoweredSelectionKey,
   resolveAiPoweredBaseUrlCandidates,
   resolvePreferredAiPoweredModel,
   summarizeWithAiPowered
@@ -120,7 +121,7 @@ const LANGUAGE_OPTIONS = [
 
 const STORAGE_KEY = 'py-transcribe:shared-hosting-state';
 const SESSION_FALLBACK_KEY = 'py-transcribe:shared-hosting-session';
-const SETTINGS_STORAGE_VERSION = 3;
+const SETTINGS_STORAGE_VERSION = 4;
 const DEFAULT_CLIENT_LIMIT = 2.5 * 1024 * 1024 * 1024;
 const DEFAULT_SERVER_LIMIT = 16 * 1024 * 1024;
 const LOCAL_AI_CHAT_HISTORY_LIMIT = 16;
@@ -205,6 +206,8 @@ const state = {
     summarizing: false,
     installedModels: [],
     aiPowered: {
+      providerId: '',
+      providerName: '',
       modelId: '',
       modelName: '',
       loading: false,
@@ -217,6 +220,7 @@ const state = {
       warning: '',
       error: '',
       baseUrl: '',
+      catalogs: [],
       models: [],
       modelSelectionReason: '',
       cached: false,
@@ -761,6 +765,31 @@ function updateDownloadLabels() {
   refs.downloadZipButton.textContent = `Download ${suffix}.zip`;
 }
 
+function syncTestDebugState() {
+  const testState = globalThis.__pyTranscribeTestState;
+  if (!testState || typeof testState !== 'object') {
+    return;
+  }
+
+  testState.aiPowered = {
+    providerId: state.localAi.aiPowered.providerId || '',
+    providerName: state.localAi.aiPowered.providerName || '',
+    baseUrl: state.localAi.aiPowered.baseUrl || '',
+    modelId: state.localAi.aiPowered.modelId || '',
+    modelName: state.localAi.aiPowered.modelName || '',
+    catalogCount: Array.isArray(state.localAi.aiPowered.catalogs) ? state.localAi.aiPowered.catalogs.length : 0,
+    modelCount: Array.isArray(state.localAi.aiPowered.models) ? state.localAi.aiPowered.models.length : 0,
+    catalogs: Array.isArray(state.localAi.aiPowered.catalogs)
+      ? state.localAi.aiPowered.catalogs.map((catalog) => ({
+          baseUrl: catalog.baseUrl || '',
+          endpointLabel: catalog.endpointLabel || '',
+          providerCount: Array.isArray(catalog.providers) ? catalog.providers.length : 0,
+          modelCount: Array.isArray(catalog.models) ? catalog.models.length : 0
+        }))
+      : []
+  };
+}
+
 function normalizeLocalAiText(value) {
   return String(value || '').replace(/\r\n/g, '\n').trim();
 }
@@ -915,14 +944,24 @@ function updateLocalAiRuntimeMode(mode, { persist = true } = {}) {
         state.localAi.aiPowered.models,
         {
           selectedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || '',
-          cachedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || ''
+          cachedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || '',
+          selectedProviderId: state.settings.aiPoweredProviderId || state.localAi.aiPowered.providerId || '',
+          cachedProviderId: state.settings.aiPoweredProviderId || state.localAi.aiPowered.providerId || '',
+          selectedBaseUrl: state.settings.aiPoweredBaseUrl || state.localAi.aiPowered.baseUrl || '',
+          cachedBaseUrl: state.settings.aiPoweredBaseUrl || state.localAi.aiPowered.baseUrl || ''
         }
       )?.model;
 
       if (preferred) {
+        state.localAi.aiPowered.providerId = preferred.providerId || state.settings.aiPoweredProviderId || '';
+        state.localAi.aiPowered.providerName = preferred.providerName || state.settings.aiPoweredProviderName || '';
+        state.localAi.aiPowered.baseUrl = normalizeAiPoweredBaseUrl(preferred.baseUrl || state.settings.aiPoweredBaseUrl || state.localAi.aiPowered.baseUrl || '');
         state.localAi.aiPowered.modelId = preferred.id;
         state.localAi.aiPowered.modelName = preferred.name;
         state.localAi.aiPowered.modelSelectionReason = 'selected';
+        state.settings.aiPoweredProviderId = state.localAi.aiPowered.providerId;
+        state.settings.aiPoweredProviderName = state.localAi.aiPowered.providerName;
+        state.settings.aiPoweredBaseUrl = state.localAi.aiPowered.baseUrl;
         state.settings.aiPoweredModelId = preferred.id;
         state.settings.aiPoweredModelName = preferred.name;
         state.settings.aiPoweredModelSelectionReason = 'selected';
@@ -948,7 +987,7 @@ function renderLocalAiModelSelect() {
     refs.aiModelLabel.textContent = runtimeKind === 'browser'
       ? 'Browser model'
       : runtimeKind === 'ai-powered'
-        ? 'AI-Powered model'
+        ? 'AI-Powered provider/model'
         : 'Local AI model';
   }
 
@@ -1004,68 +1043,132 @@ function renderLocalAiModelSelect() {
   }
 
   if (runtimeKind === 'ai-powered') {
-    const selectedModelId = normalizeLocalAiText(
-      state.localAi.aiPowered.modelId
-        || state.settings.aiPoweredModelId
-        || resolvePreferredAiPoweredModel(state.localAi.aiPowered.models, {
-          selectedModelId: state.settings.aiPoweredModelId || '',
-          cachedModelId: state.localAi.aiPowered.modelId || ''
-        })?.model?.id
-    );
-    const fragment = document.createDocumentFragment();
-    const selectedModel = normalizeAiPoweredModel(
-      state.localAi.aiPowered.models.find((model) => {
-        const normalizedId = String(model?.id || '').trim().toLowerCase();
-        const normalizedName = String(model?.name || '').trim().toLowerCase();
-        const normalizedSelected = selectedModelId.toLowerCase();
-        return normalizedId === normalizedSelected || normalizedName === normalizedSelected;
-      })
-    ) || resolvePreferredAiPoweredModel(state.localAi.aiPowered.models, {
-      selectedModelId,
-      cachedModelId: state.localAi.aiPowered.modelId || ''
+    const catalogs = Array.isArray(state.localAi.aiPowered.catalogs) ? state.localAi.aiPowered.catalogs : [];
+    const fallbackBaseUrl = state.localAi.aiPowered.baseUrl || state.settings.aiPoweredBaseUrl || state.config.aiPoweredBaseUrl || '';
+    const fallbackSelectedKey = buildAiPoweredSelectionKey({
+      baseUrl: fallbackBaseUrl,
+      providerId: state.localAi.aiPowered.providerId || state.settings.aiPoweredProviderId || '',
+      modelId: state.localAi.aiPowered.modelId || state.settings.aiPoweredModelId || ''
+    });
+    const availableModels = catalogs.length
+      ? catalogs.flatMap((catalog) => Array.isArray(catalog.models) ? catalog.models : [])
+      : state.localAi.aiPowered.models;
+    const selectedModel = availableModels.find((model) => {
+      const selectionKey = String(model?.selectionKey || '').trim();
+      if (selectionKey && selectionKey === fallbackSelectedKey) {
+        return true;
+      }
+
+      const normalizedId = String(model?.id || '').trim().toLowerCase();
+      const normalizedName = String(model?.name || '').trim().toLowerCase();
+      const normalizedSelected = String(state.localAi.aiPowered.modelId || state.settings.aiPoweredModelId || '').trim().toLowerCase();
+      return normalizedId === normalizedSelected || normalizedName === normalizedSelected;
+    }) || resolvePreferredAiPoweredModel(availableModels, {
+      selectedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || '',
+      cachedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || '',
+      selectedProviderId: state.settings.aiPoweredProviderId || state.localAi.aiPowered.providerId || '',
+      cachedProviderId: state.settings.aiPoweredProviderId || state.localAi.aiPowered.providerId || '',
+      selectedBaseUrl: state.settings.aiPoweredBaseUrl || state.localAi.aiPowered.baseUrl || '',
+      cachedBaseUrl: state.settings.aiPoweredBaseUrl || state.localAi.aiPowered.baseUrl || ''
     })?.model;
 
-    if (state.localAi.aiPowered.models.length) {
-      for (const optionModel of state.localAi.aiPowered.models) {
+    const fragment = document.createDocumentFragment();
+    if (catalogs.length) {
+      let appendedAnyCatalog = false;
+      for (const catalog of catalogs) {
+        const groupLabel = describeAiPoweredEndpoint(catalog.baseUrl || fallbackBaseUrl)
+          || normalizeAiPoweredBaseUrl(catalog.baseUrl || fallbackBaseUrl)
+          || 'AI-Powered';
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = groupLabel;
+        const models = Array.isArray(catalog.models) ? [...catalog.models] : [];
+        models.sort((left, right) => {
+          const leftProvider = String(left?.providerName || left?.providerId || '').toLowerCase();
+          const rightProvider = String(right?.providerName || right?.providerId || '').toLowerCase();
+          if (leftProvider !== rightProvider) {
+            return leftProvider.localeCompare(rightProvider);
+          }
+          return String(left?.name || left?.id || '').localeCompare(String(right?.name || right?.id || ''));
+        });
+
+        for (const optionModel of models) {
+          const option = document.createElement('option');
+          const optionLabel = [
+            optionModel.providerName || optionModel.providerId || 'Provider',
+            optionModel.name || optionModel.id
+          ].filter(Boolean).join(' · ');
+          option.value = optionModel.selectionKey || buildAiPoweredSelectionKey({
+            baseUrl: optionModel.baseUrl || catalog.baseUrl || fallbackBaseUrl,
+            providerId: optionModel.providerId || '',
+            modelId: optionModel.id
+          });
+          option.textContent = optionLabel;
+          option.title = formatAiPoweredModelLabel(optionModel);
+          option.selected = option.value === fallbackSelectedKey;
+          optgroup.appendChild(option);
+        }
+
+        if (optgroup.children.length) {
+          fragment.appendChild(optgroup);
+          appendedAnyCatalog = true;
+        }
+      }
+
+      if (!appendedAnyCatalog) {
+        const option = document.createElement('option');
+        option.value = fallbackSelectedKey;
+        option.textContent = 'No AI-Powered text models detected yet';
+        option.selected = true;
+        option.disabled = true;
+        fragment.appendChild(option);
+      }
+    } else if (availableModels.length) {
+      for (const optionModel of availableModels) {
         fragment.appendChild(optionNode(
-          optionModel.id,
+          optionModel.selectionKey || buildAiPoweredSelectionKey({
+            baseUrl: optionModel.baseUrl || fallbackBaseUrl,
+            providerId: optionModel.providerId || '',
+            modelId: optionModel.id
+          }),
           formatAiPoweredModelLabel(optionModel),
-          optionModel.id === (selectedModel?.id || selectedModelId)
+          (optionModel.selectionKey || '') === fallbackSelectedKey
         ));
       }
     } else {
       const option = document.createElement('option');
-      option.value = selectedModelId;
-      option.textContent = 'No AI-Powered models detected yet';
+      option.value = fallbackSelectedKey;
+      option.textContent = 'No AI-Powered providers detected yet';
       option.selected = true;
       option.disabled = true;
       fragment.appendChild(option);
     }
 
-    if (selectedModelId && selectedModel && selectedModel.id !== selectedModelId) {
+    if (fallbackSelectedKey && (!selectedModel || selectedModel.selectionKey !== fallbackSelectedKey)) {
       const customOption = document.createElement('option');
-      customOption.value = selectedModelId;
-      customOption.textContent = `${selectedModelId} (selected, not returned yet)`;
+      customOption.value = fallbackSelectedKey;
+      customOption.textContent = `${state.localAi.aiPowered.providerName || state.settings.aiPoweredProviderName || state.localAi.aiPowered.providerId || 'Selected provider'} · ${state.localAi.aiPowered.modelName || state.settings.aiPoweredModelName || state.localAi.aiPowered.modelId || 'selected'} (not returned yet)`;
       customOption.selected = true;
       fragment.insertBefore(customOption, fragment.firstChild);
     }
 
     refs.aiModelSelect.replaceChildren(fragment);
-    refs.aiModelSelect.value = selectedModel?.id || selectedModelId || refs.aiModelSelect.value || '';
+    refs.aiModelSelect.value = selectedModel?.selectionKey || fallbackSelectedKey || refs.aiModelSelect.value || '';
 
     if (refs.aiModelMeta) {
       const selectedLabel = selectedModel
-        ? `Selected ${formatAiPoweredModelLabel(selectedModel)}.`
-        : 'Choose an available AI-Powered model for summaries and chat.';
+        ? `Selected ${selectedModel.providerName || selectedModel.providerId || 'AI-Powered'} · ${selectedModel.name || selectedModel.id}.`
+        : 'Choose an available AI-Powered provider/model pair for summaries and chat.';
       const heuristicNote = state.localAi.aiPowered.modelSelectionReason === 'heuristic' && selectedModel
         ? ' Auto-selected via the AI-Powered ranking heuristic.'
         : '';
-      const modelCount = state.localAi.aiPowered.models.length;
-      const endpointText = describeAiPoweredEndpoint(state.localAi.aiPowered.baseUrl || state.settings.aiPoweredBaseUrl || state.config.aiPoweredBaseUrl || '');
+      const modelCount = availableModels.length;
+      const providerCount = new Set(availableModels.map((model) => String(model?.providerId || '').trim()).filter(Boolean)).size;
+      const endpointCount = catalogs.length || (availableModels.length ? 1 : 0);
+      const endpointText = describeAiPoweredEndpoint(selectedModel?.baseUrl || state.localAi.aiPowered.baseUrl || state.settings.aiPoweredBaseUrl || state.config.aiPoweredBaseUrl || '');
       const endpointSummary = endpointText ? `Endpoint: ${endpointText}.` : '';
       refs.aiModelMeta.textContent = [
         `${selectedLabel}${heuristicNote}`,
-        modelCount ? `${modelCount.toLocaleString()} AI-Powered model${modelCount === 1 ? '' : 's'} available.` : 'Waiting for AI-Powered to return models.',
+        modelCount ? `${modelCount.toLocaleString()} provider model${modelCount === 1 ? '' : 's'} available across ${providerCount.toLocaleString()} provider${providerCount === 1 ? '' : 's'} and ${endpointCount.toLocaleString()} endpoint${endpointCount === 1 ? '' : 's'}.` : 'Waiting for AI-Powered to return provider catalogs.',
         endpointSummary
       ].filter(Boolean).join(' ');
     }
@@ -1278,28 +1381,62 @@ function updateLocalAiModelSelection(modelName, { persist = true } = {}) {
     state.localAi.summaryError = '';
     state.localAi.chat.error = '';
   } else if (runtimeKind === 'ai-powered') {
-    const nextModel = normalizeAiPoweredModel(
-      state.localAi.aiPowered.models.find((entry) => {
-        const normalizedId = String(entry?.id || '').trim().toLowerCase();
-        const normalizedName = String(entry?.name || '').trim().toLowerCase();
-        const normalizedValue = nextValue.toLowerCase();
-        return normalizedId === normalizedValue || normalizedName === normalizedValue;
-      })
-    ) || resolvePreferredAiPoweredModel(state.localAi.aiPowered.models, {
-      selectedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || '',
-      cachedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || ''
+    const parsedSelection = nextValue.includes('|||')
+      ? parseAiPoweredSelectionKey(nextValue)
+      : {
+          baseUrl: state.localAi.aiPowered.baseUrl || state.settings.aiPoweredBaseUrl || state.config.aiPoweredBaseUrl || '',
+          providerId: state.localAi.aiPowered.providerId || state.settings.aiPoweredProviderId || '',
+          modelId: nextValue
+        };
+    const nextModel = resolvePreferredAiPoweredModel(state.localAi.aiPowered.models, {
+      selectedModelId: parsedSelection.modelId || state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || '',
+      cachedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || '',
+      selectedProviderId: parsedSelection.providerId || state.settings.aiPoweredProviderId || state.localAi.aiPowered.providerId || '',
+      cachedProviderId: state.settings.aiPoweredProviderId || state.localAi.aiPowered.providerId || '',
+      selectedBaseUrl: parsedSelection.baseUrl || state.settings.aiPoweredBaseUrl || state.localAi.aiPowered.baseUrl || '',
+      cachedBaseUrl: state.settings.aiPoweredBaseUrl || state.localAi.aiPowered.baseUrl || ''
     })?.model;
 
+    if (parsedSelection.modelId) {
+      state.settings.aiPoweredModelId = parsedSelection.modelId;
+      state.settings.aiPoweredModelSelectionReason = 'selected';
+    }
+    if (parsedSelection.providerId) {
+      state.settings.aiPoweredProviderId = parsedSelection.providerId;
+    }
+    if (parsedSelection.baseUrl) {
+      state.settings.aiPoweredBaseUrl = normalizeAiPoweredBaseUrl(parsedSelection.baseUrl);
+    }
+
     if (nextModel) {
+      state.localAi.aiPowered.providerId = nextModel.providerId || state.settings.aiPoweredProviderId || '';
+      state.localAi.aiPowered.providerName = nextModel.providerName || state.settings.aiPoweredProviderName || '';
+      state.localAi.aiPowered.baseUrl = normalizeAiPoweredBaseUrl(nextModel.baseUrl || state.settings.aiPoweredBaseUrl || state.localAi.aiPowered.baseUrl || '');
       state.localAi.aiPowered.modelId = nextModel.id;
       state.localAi.aiPowered.modelName = nextModel.name;
       state.localAi.aiPowered.modelSelectionReason = 'selected';
+      state.settings.aiPoweredProviderId = state.localAi.aiPowered.providerId;
+      state.settings.aiPoweredProviderName = state.localAi.aiPowered.providerName;
+      state.settings.aiPoweredBaseUrl = state.localAi.aiPowered.baseUrl;
       state.settings.aiPoweredModelId = nextModel.id;
       state.settings.aiPoweredModelName = nextModel.name;
       state.settings.aiPoweredModelSelectionReason = 'selected';
       state.localAi.modelId = nextModel.id;
       state.localAi.modelName = nextModel.name;
       state.localAi.cachedModelName = nextModel.name;
+    } else if (parsedSelection.modelId) {
+      state.localAi.aiPowered.modelId = parsedSelection.modelId;
+      state.localAi.aiPowered.modelName = state.settings.aiPoweredModelName || state.localAi.aiPowered.modelName || parsedSelection.modelId;
+      state.localAi.aiPowered.providerId = parsedSelection.providerId || state.localAi.aiPowered.providerId || '';
+      state.localAi.aiPowered.providerName = state.settings.aiPoweredProviderName || state.localAi.aiPowered.providerName || '';
+      state.localAi.aiPowered.baseUrl = normalizeAiPoweredBaseUrl(parsedSelection.baseUrl || state.localAi.aiPowered.baseUrl || state.settings.aiPoweredBaseUrl || '');
+      state.localAi.modelId = state.localAi.aiPowered.modelId;
+      state.localAi.modelName = state.localAi.aiPowered.modelName;
+      state.localAi.cachedModelName = state.localAi.aiPowered.modelName;
+      state.localAi.aiPowered.modelSelectionReason = 'selected';
+      state.settings.aiPoweredModelName = state.localAi.aiPowered.modelName;
+      state.settings.aiPoweredProviderName = state.localAi.aiPowered.providerName;
+      state.settings.aiPoweredModelSelectionReason = 'selected';
     }
 
     state.localAi.available = Boolean(state.localAi.aiPowered.ready || state.localAi.aiPowered.models.length);
@@ -1316,6 +1453,8 @@ function updateLocalAiModelSelection(modelName, { persist = true } = {}) {
         : AI_POWERED_STATUS_MESSAGES.checking;
     state.localAi.detail = nextModel
       ? `Selected ${formatAiPoweredModelLabel(nextModel)} will load through AI-Powered.`
+      : parsedSelection.modelId
+        ? `Selected ${parsedSelection.modelId} will load through AI-Powered when it becomes available.`
       : state.localAi.aiPowered.models.length
         ? 'Choose an available AI-Powered model for summaries and chat.'
         : 'AI-Powered has not returned any models yet.';
@@ -1414,7 +1553,7 @@ function renderLocalAiState() {
     const runtimeText = runtimeMode === LOCAL_AI_RUNTIME_MODES.browser
       ? 'Browser-only mode uses the cached Kimi GGUF model in OPFS.'
       : runtimeMode === LOCAL_AI_RUNTIME_MODES.aiPowered
-        ? 'AI-Powered mode uses the local provider bridge and its model catalog for summaries and chat.'
+        ? 'AI-Powered mode uses the local bridge, plus any reachable provider catalogs, for summaries and chat.'
       : runtimeMode === LOCAL_AI_RUNTIME_MODES.local
         ? 'Local-only mode prefers Ollama and does not switch to the browser model cache.'
         : 'Auto mode checks local Ollama first, then falls back to the browser WASM model if needed.';
@@ -1446,9 +1585,9 @@ function renderLocalAiState() {
         ? 'Refresh browser model'
         : 'Load browser model'
     : runtimeKind === 'ai-powered'
-      ? aiPoweredWorking
+    ? aiPoweredWorking
         ? 'Connecting...'
-        : 'Refresh AI-Powered models'
+        : 'Refresh AI-Powered providers'
     : state.localAi.status === 'unavailable'
       ? 'Retry Ollama'
       : state.localAi.checking
@@ -1467,7 +1606,7 @@ function renderLocalAiState() {
     : runtimeKind === 'ai-powered'
       ? aiPoweredWorking
         ? 'Connecting to the local AI-Powered service.'
-        : 'Refresh the AI-Powered model list from the local bridge.'
+        : 'Refresh the AI-Powered provider catalogs from the local bridge.'
       : modelIsInstalled
         ? 'Refresh the installed Kimi model list from Ollama.'
         : selectedModelName && isLocalAiPullCandidate(selectedModelName)
@@ -1832,6 +1971,8 @@ function setAiPoweredLocalAiUnavailable(detail, { keepModel = false } = {}) {
   state.localAi.aiPowered.error = message;
   state.localAi.aiPowered.runtime = null;
   if (!keepModel) {
+    state.localAi.aiPowered.providerId = state.settings.aiPoweredProviderId || state.localAi.aiPowered.providerId || '';
+    state.localAi.aiPowered.providerName = state.settings.aiPoweredProviderName || state.localAi.aiPowered.providerName || '';
     state.localAi.aiPowered.modelId = state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || '';
     state.localAi.aiPowered.modelName = state.settings.aiPoweredModelName || state.localAi.aiPowered.modelName || '';
     state.localAi.modelId = state.localAi.aiPowered.modelId || '';
@@ -1849,6 +1990,9 @@ function setAiPoweredLocalAiReady(model, { source = 'installed', reason = '', ch
   }
 
   const modelName = normalized.name;
+  const providerId = normalized.providerId || '';
+  const providerName = normalized.providerName || '';
+  const endpointLabel = normalized.endpointLabel || describeAiPoweredEndpoint(normalized.baseUrl || baseUrl || state.localAi.aiPowered.baseUrl || state.settings.aiPoweredBaseUrl || state.config.aiPoweredBaseUrl || '');
   state.localAi.available = true;
   state.localAi.runtimeKind = 'ai-powered';
   state.localAi.checking = false;
@@ -1857,13 +2001,15 @@ function setAiPoweredLocalAiReady(model, { source = 'installed', reason = '', ch
   state.localAi.status = 'ready';
   state.localAi.message = AI_POWERED_STATUS_MESSAGES.ready;
   state.localAi.detail = source === 'pulled'
-    ? `Using AI-Powered model: ${modelName}. It is ready for summaries and chat.`
-    : `Using AI-Powered model: ${modelName}.`;
+    ? `Using AI-Powered provider ${providerName || 'selected provider'} with model ${modelName}. It is ready for summaries and chat.`
+    : `Using AI-Powered provider ${providerName || 'selected provider'} with model ${modelName}.`;
   state.localAi.progress = null;
   state.localAi.progressText = '';
   state.localAi.summaryError = '';
   state.localAi.activeController = null;
   state.localAi.modelSelectionReason = reason || state.localAi.modelSelectionReason || 'selected';
+  state.localAi.aiPowered.providerId = providerId;
+  state.localAi.aiPowered.providerName = providerName;
   state.localAi.modelId = normalized.id;
   state.localAi.modelName = modelName;
   state.localAi.cachedModelName = modelName;
@@ -1880,6 +2026,8 @@ function setAiPoweredLocalAiReady(model, { source = 'installed', reason = '', ch
   state.localAi.aiPowered.error = '';
   state.localAi.aiPowered.cached = true;
   state.localAi.aiPowered.loadedAt = checkedAt;
+  state.localAi.aiPowered.providerId = providerId;
+  state.localAi.aiPowered.providerName = providerName;
   state.localAi.aiPowered.modelId = normalized.id;
   state.localAi.aiPowered.modelName = modelName;
   state.localAi.aiPowered.modelSelectionReason = reason || state.localAi.aiPowered.modelSelectionReason || 'selected';
@@ -1888,13 +2036,20 @@ function setAiPoweredLocalAiReady(model, { source = 'installed', reason = '', ch
   state.localAi.aiPowered.lastSuccessfulRuntimeAt = checkedAt;
   state.localAi.aiPowered.baseUrl = normalizeAiPoweredBaseUrl(baseUrl || state.localAi.aiPowered.baseUrl || state.settings.aiPoweredBaseUrl || state.config.aiPoweredBaseUrl || '');
   state.settings.aiPoweredBaseUrl = state.localAi.aiPowered.baseUrl;
+  state.settings.aiPoweredProviderId = providerId;
+  state.settings.aiPoweredProviderName = providerName;
   state.settings.aiPoweredModelId = normalized.id;
   state.settings.aiPoweredModelName = modelName;
   state.settings.aiPoweredModelSelectionReason = state.localAi.aiPowered.modelSelectionReason;
   state.settings.aiPoweredLastSuccessfulCheckAt = checkedAt;
   state.settings.aiPoweredLastSuccessfulRuntime = 'ai-powered';
   state.settings.aiPoweredLastSuccessfulRuntimeAt = checkedAt;
-  setStatus(`AI-Powered model ready: ${formatAiPoweredModelLabel(normalized)}.`);
+  setStatus(`AI-Powered model ready: ${formatAiPoweredModelLabel({
+    ...normalized,
+    providerId,
+    providerName,
+    endpointLabel
+  })}.`);
   persistSettings();
   renderAll();
 }
@@ -2151,7 +2306,7 @@ async function initializeAiPoweredLocalAi({ forceRefresh = false } = {}) {
   renderAll();
 
   try {
-    const { baseUrl, models } = await fetchAiPoweredModelsFromCandidates({
+    const { baseUrl, catalogs, models } = await fetchAiPoweredCatalogsFromCandidates({
       baseUrls: resolveAiPoweredBaseUrlCandidates(resolveAiPoweredBaseUrl()),
       signal: controller.signal
     });
@@ -2160,11 +2315,16 @@ async function initializeAiPoweredLocalAi({ forceRefresh = false } = {}) {
     }
 
     state.localAi.aiPowered.baseUrl = normalizeAiPoweredBaseUrl(baseUrl);
+    state.localAi.aiPowered.catalogs = Array.isArray(catalogs) ? catalogs : [];
     state.localAi.aiPowered.models = Array.isArray(models) ? models : [];
 
     const preferredModel = resolvePreferredAiPoweredModel(state.localAi.aiPowered.models, {
       selectedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || '',
-      cachedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || ''
+      cachedModelId: state.settings.aiPoweredModelId || state.localAi.aiPowered.modelId || '',
+      selectedProviderId: state.settings.aiPoweredProviderId || state.localAi.aiPowered.providerId || '',
+      cachedProviderId: state.settings.aiPoweredProviderId || state.localAi.aiPowered.providerId || '',
+      selectedBaseUrl: state.settings.aiPoweredBaseUrl || state.localAi.aiPowered.baseUrl || '',
+      cachedBaseUrl: state.settings.aiPoweredBaseUrl || state.localAi.aiPowered.baseUrl || ''
     });
 
     if (!preferredModel?.model) {
@@ -2179,7 +2339,7 @@ async function initializeAiPoweredLocalAi({ forceRefresh = false } = {}) {
       source: preferredModel.reason === 'heuristic' ? 'installed' : preferredModel.reason,
       reason: preferredModel.reason,
       checkedAt: new Date().toISOString(),
-      baseUrl: state.localAi.aiPowered.baseUrl
+      baseUrl: preferredModel.model.baseUrl || state.localAi.aiPowered.baseUrl
     });
   } catch (error) {
     if (controller.signal.aborted || requestId !== state.localAi.aiPowered.loadRequestId) {
@@ -2574,13 +2734,19 @@ async function summarizeCurrentTranscript() {
   const activeModelId = runtimeKind === 'ai-powered'
     ? state.localAi.aiPowered.modelId || state.localAi.modelId
     : state.localAi.modelId;
+  const activeProviderId = runtimeKind === 'ai-powered'
+    ? state.localAi.aiPowered.providerId || state.settings.aiPoweredProviderId || ''
+    : '';
+  const activeProviderName = runtimeKind === 'ai-powered'
+    ? state.localAi.aiPowered.providerName || state.settings.aiPoweredProviderName || ''
+    : '';
   state.localAi.message = runtimeKind === 'ai-powered'
     ? AI_POWERED_STATUS_MESSAGES.summarizing
     : runtimeKind === 'browser'
       ? LOCAL_AI_STATUS_MESSAGES.browserLoadingModel
       : LOCAL_AI_STATUS_MESSAGES.summarizing;
   state.localAi.detail = runtimeKind === 'ai-powered'
-    ? `Using AI-Powered model ${activeModelName} at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`
+    ? `Using AI-Powered ${activeProviderName ? `provider ${activeProviderName} ` : ''}with model ${activeModelName} at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`
     : `Using ${state.localAi.modelName} at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`;
   state.localAi.summaryError = '';
   state.localAi.summaryWarning = '';
@@ -2600,6 +2766,7 @@ async function summarizeCurrentTranscript() {
       : runtimeKind === 'ai-powered'
         ? await summarizeWithAiPowered({
           modelId: activeModelId,
+          providerId: activeProviderId,
           transcriptText: transcript,
           detailLevel,
           baseUrl: resolveAiPoweredBaseUrl(),
@@ -2638,7 +2805,7 @@ async function summarizeCurrentTranscript() {
     state.localAi.detail = runtimeKind === 'browser'
       ? `Summarized with ${activeModelName} in the browser runtime at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`
       : runtimeKind === 'ai-powered'
-        ? `Summarized with ${activeModelName} through AI-Powered at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`
+        ? `Summarized with ${activeModelName}${activeProviderName ? ` from ${activeProviderName}` : ''} through AI-Powered at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`
       : `Summarized with ${state.localAi.modelName} at ${LOCAL_AI_DETAIL_LEVELS[detailLevel].label} detail.`;
     state.localAi.activeController = null;
     setStatus(runtimeKind === 'ai-powered'
@@ -2832,13 +2999,19 @@ async function sendChatMessage() {
   const activeModelId = runtimeKind === 'ai-powered'
     ? state.localAi.aiPowered.modelId || state.localAi.modelId
     : state.localAi.modelId;
+  const activeProviderId = runtimeKind === 'ai-powered'
+    ? state.localAi.aiPowered.providerId || state.settings.aiPoweredProviderId || ''
+    : '';
+  const activeProviderName = runtimeKind === 'ai-powered'
+    ? state.localAi.aiPowered.providerName || state.settings.aiPoweredProviderName || ''
+    : '';
   state.localAi.chat.sending = true;
   state.localAi.chat.status = 'thinking';
   state.localAi.chat.message = 'Thinking...';
   state.localAi.chat.detail = runtimeKind === 'browser'
     ? 'The browser runtime is streaming a reply locally.'
     : runtimeKind === 'ai-powered'
-      ? 'AI-Powered is streaming a reply locally.'
+      ? `AI-Powered${activeProviderName ? ` provider ${activeProviderName}` : ''} is streaming a reply locally.`
       : 'Ollama is streaming a reply locally.';
   state.localAi.chat.error = '';
   state.localAi.chat.contextSignature = buildLocalAiContextSignature(transcriptText, summaryText);
@@ -2883,6 +3056,7 @@ async function sendChatMessage() {
       : runtimeKind === 'ai-powered'
         ? await chatWithAiPowered({
           modelId: activeModelId,
+          providerId: activeProviderId,
           transcriptText,
           summaryText,
           history,
@@ -2940,7 +3114,7 @@ async function sendChatMessage() {
     state.localAi.chat.detail = runtimeKind === 'browser'
       ? `Reply generated with ${activeModelName} in the browser runtime.`
       : runtimeKind === 'ai-powered'
-        ? `Reply generated with ${activeModelName} through AI-Powered.`
+        ? `Reply generated with ${activeModelName}${activeProviderName ? ` from ${activeProviderName}` : ''} through AI-Powered.`
         : `Reply generated with ${state.localAi.modelName}.`;
     state.localAi.chat.error = '';
     state.localAi.activeController = null;
@@ -3490,6 +3664,7 @@ function renderAll() {
   updateRuntimeButtonLabel();
   updateDownloadLabels();
   renderEventLog();
+  syncTestDebugState();
   persistSettings();
 }
 
@@ -3558,6 +3733,8 @@ function buildSettingsSnapshot() {
     localAiRuntimeMode: normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || state.localAi.runtimeMode || 'auto'),
     localAiBaseUrl: normalizeOllamaBaseUrl(state.localAi.baseUrl || state.settings.localAiBaseUrl || state.config.localAiBaseUrl || ''),
     aiPoweredBaseUrl: normalizeAiPoweredBaseUrl(state.localAi.aiPowered.baseUrl || state.settings.aiPoweredBaseUrl || state.config.aiPoweredBaseUrl || ''),
+    aiPoweredProviderId: state.localAi.aiPowered.providerId || '',
+    aiPoweredProviderName: state.localAi.aiPowered.providerName || '',
     aiPoweredModelId: state.localAi.aiPowered.modelId || '',
     aiPoweredModelName: state.localAi.aiPowered.modelName || '',
     aiPoweredModelSelectionReason: state.localAi.aiPowered.modelSelectionReason || '',
@@ -3675,6 +3852,8 @@ function loadSettings() {
     localAiRuntimeMode: normalizeLocalAiRuntimeMode(injected.localAiRuntimeMode || LOCAL_AI_RUNTIME_MODES.auto),
     localAiBaseUrl: normalizeOllamaBaseUrl(injected.localAiBaseUrl || LOCAL_AI_PROXY_BASE_URL),
     aiPoweredBaseUrl: normalizeAiPoweredBaseUrl(injected.aiPoweredBaseUrl || AI_POWERED_PROXY_BASE_URL),
+    aiPoweredProviderId: '',
+    aiPoweredProviderName: '',
     aiPoweredModelId: '',
     aiPoweredModelName: '',
     aiPoweredModelSelectionReason: '',
@@ -3724,6 +3903,8 @@ function loadSettings() {
       localAiRuntimeMode: normalizeLocalAiRuntimeMode(parsed?.localAiRuntimeMode || defaults.localAiRuntimeMode),
       localAiBaseUrl: normalizeOllamaBaseUrl(parsed?.localAiBaseUrl || defaults.localAiBaseUrl),
       aiPoweredBaseUrl: normalizeAiPoweredBaseUrl(parsed?.aiPoweredBaseUrl || defaults.aiPoweredBaseUrl),
+      aiPoweredProviderId: String(parsed?.aiPoweredProviderId || defaults.aiPoweredProviderId),
+      aiPoweredProviderName: String(parsed?.aiPoweredProviderName || defaults.aiPoweredProviderName),
       aiPoweredModelId: String(parsed?.aiPoweredModelId || ''),
       aiPoweredModelName: String(parsed?.aiPoweredModelName || ''),
       aiPoweredModelSelectionReason: String(parsed?.aiPoweredModelSelectionReason || ''),
@@ -3768,6 +3949,8 @@ function applySettingsSnapshot() {
   state.localAi.runtimeMode = normalizeLocalAiRuntimeMode(state.settings.localAiRuntimeMode || 'auto');
   state.localAi.baseUrl = normalizeOllamaBaseUrl(state.settings.localAiBaseUrl || state.config.localAiBaseUrl || '');
   state.localAi.aiPowered.baseUrl = normalizeAiPoweredBaseUrl(state.settings.aiPoweredBaseUrl || state.config.aiPoweredBaseUrl || '');
+  state.localAi.aiPowered.providerId = state.settings.aiPoweredProviderId || '';
+  state.localAi.aiPowered.providerName = state.settings.aiPoweredProviderName || '';
   state.localAi.modelName = state.settings.localAiModelName || '';
   state.localAi.cachedModelName = state.settings.localAiModelName || '';
   state.localAi.aiPowered.modelId = state.settings.aiPoweredModelId || '';
@@ -4217,6 +4400,8 @@ function describeAiPoweredEndpoint(baseUrl) {
 
   return normalized === AI_POWERED_PROXY_BASE_URL
     ? 'same-origin PHP bridge'
+    : normalized === 'https://contorted-jarrod-supersecure.ngrok-free.dev'
+      ? 'ngrok tunnel'
     : normalized;
 }
 

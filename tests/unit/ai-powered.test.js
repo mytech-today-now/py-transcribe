@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AI_POWERED_NGROK_BASE_URL,
   buildAiPoweredApiUrl,
+  buildAiPoweredSelectionKey,
+  fetchAiPoweredCatalogsFromCandidates,
   fetchAiPoweredModelsFromCandidates,
   formatAiPoweredModelLabel,
+  parseAiPoweredSelectionKey,
   resolveAiPoweredBaseUrlCandidates,
   resolvePreferredAiPoweredModel
 } from '../../web/lib/ai-powered.js';
@@ -10,13 +14,16 @@ import {
 describe('AI-Powered helpers', () => {
   it('builds direct and same-origin AI-Powered request URLs', () => {
     expect(buildAiPoweredApiUrl('api/ai-powered', 'health')).toBe('api/ai-powered/health.php');
-    expect(buildAiPoweredApiUrl('http://127.0.0.1:3001', 'health')).toBe('http://127.0.0.1:3001/api/health');
-    expect(buildAiPoweredApiUrl('http://localhost:3001', 'stream')).toBe('http://localhost:3001/api/stream');
+    expect(buildAiPoweredApiUrl('api/ai-powered', 'providers')).toBe('api/ai-powered/providers.php');
+    expect(buildAiPoweredApiUrl('http://127.0.0.1:3001', 'health')).toBe('http://127.0.0.1:3001/health');
+    expect(buildAiPoweredApiUrl('http://localhost:3001', 'stream')).toBe('http://localhost:3001/stream');
+    expect(buildAiPoweredApiUrl(AI_POWERED_NGROK_BASE_URL, 'providers')).toBe(`${AI_POWERED_NGROK_BASE_URL}/providers`);
   });
 
-  it('prefers the configured AI-Powered proxy bridge before loopback endpoints', () => {
+  it('prefers the configured AI-Powered proxy bridge before ngrok and loopback endpoints', () => {
     expect(resolveAiPoweredBaseUrlCandidates('api/ai-powered')).toEqual([
       'api/ai-powered',
+      AI_POWERED_NGROK_BASE_URL,
       'http://127.0.0.1:3001',
       'http://localhost:3001',
       'http://[::1]:3001'
@@ -36,11 +43,7 @@ describe('AI-Powered helpers', () => {
         };
       }
 
-      if (String(url).startsWith('http://127.0.0.1:3001/api/health')) {
-        throw new Error('Failed to fetch');
-      }
-
-      if (String(url).startsWith('http://localhost:3001/api/health')) {
+      if (String(url).startsWith(`${AI_POWERED_NGROK_BASE_URL}/health`)) {
         return {
           ok: true,
           status: 200,
@@ -49,7 +52,7 @@ describe('AI-Powered helpers', () => {
         };
       }
 
-      if (String(url).startsWith('http://localhost:3001/api/models')) {
+      if (String(url).startsWith(`${AI_POWERED_NGROK_BASE_URL}/models`)) {
         return {
           ok: true,
           status: 200,
@@ -68,23 +71,195 @@ describe('AI-Powered helpers', () => {
       fetchImpl
     });
 
-    expect(result.baseUrl).toBe('http://localhost:3001');
-    expect(result.models).toEqual([
-      { id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4', capabilities: ['text', 'structured'] }
-    ]);
+    expect(result.baseUrl).toBe(AI_POWERED_NGROK_BASE_URL);
+    expect(result.models).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'anthropic/claude-sonnet-4',
+        name: 'Claude Sonnet 4',
+        capabilities: ['text', 'structured']
+      })
+    ]));
     expect(requests).toEqual([
       'api/ai-powered/health.php',
-      'http://127.0.0.1:3001/api/health',
-      'http://localhost:3001/api/health',
-      'http://localhost:3001/api/models?modality=text'
+      `${AI_POWERED_NGROK_BASE_URL}/health`,
+      `${AI_POWERED_NGROK_BASE_URL}/models?modality=text`
     ]);
+  });
+
+  it('fetches and combines provider catalogs across reachable endpoints', async () => {
+    const requests = [];
+    const sameOriginProviders = [
+      { id: 'anthropic', name: 'Anthropic', active: true, modalities: ['text', 'structured'], inputModalities: [] },
+      { id: 'openai', name: 'OpenAI', active: true, modalities: ['text'], inputModalities: [] }
+    ];
+    const ngrokProviders = [
+      { id: 'xai', name: 'xAI / Grok', active: true, modalities: ['text', 'structured'], inputModalities: [] },
+      { id: 'openrouter', name: 'OpenRouter', active: true, modalities: ['text'], inputModalities: [] }
+    ];
+
+    const catalogModels = {
+      sameOrigin: {
+        anthropic: [
+          {
+            id: 'anthropic/claude-sonnet-4',
+            name: 'Claude Sonnet 4',
+            capabilities: ['text', 'structured'],
+            providerId: 'anthropic',
+            providerName: 'Anthropic'
+          }
+        ],
+        openai: [
+          {
+            id: 'openai/gpt-4.1-mini',
+            name: 'GPT-4.1 Mini',
+            capabilities: ['text'],
+            providerId: 'openai',
+            providerName: 'OpenAI'
+          }
+        ]
+      },
+      ngrok: {
+        xai: [
+          {
+            id: 'xai/grok-4',
+            name: 'Grok 4',
+            capabilities: ['text', 'structured'],
+            providerId: 'xai',
+            providerName: 'xAI / Grok'
+          }
+        ],
+        openrouter: [
+          {
+            id: 'openrouter/qwen-3-coder',
+            name: 'Qwen 3 Coder',
+            capabilities: ['text'],
+            providerId: 'openrouter',
+            providerName: 'OpenRouter'
+          }
+        ]
+      }
+    };
+
+    const fetchImpl = async (url) => {
+      requests.push(String(url));
+      const text = String(url);
+
+      if (text.startsWith('api/ai-powered/health.php')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ status: 'ok', service: 'ai-powered' }),
+          text: async () => ''
+        };
+      }
+
+      if (text.startsWith('api/ai-powered/providers.php')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => sameOriginProviders,
+          text: async () => ''
+        };
+      }
+
+      if (text.startsWith('api/ai-powered/models.php')) {
+        const parsed = new URL(text, 'http://example.test');
+        const provider = parsed.searchParams.get('provider') || '';
+        return {
+          ok: true,
+          status: 200,
+          json: async () => catalogModels.sameOrigin[provider] || [],
+          text: async () => ''
+        };
+      }
+
+      if (text.startsWith(`${AI_POWERED_NGROK_BASE_URL}/health`)) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ status: 'ok', service: 'ai-powered' }),
+          text: async () => ''
+        };
+      }
+
+      if (text.startsWith(`${AI_POWERED_NGROK_BASE_URL}/providers`)) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ngrokProviders,
+          text: async () => ''
+        };
+      }
+
+      if (text.startsWith(`${AI_POWERED_NGROK_BASE_URL}/models`)) {
+        const parsed = new URL(text);
+        const provider = parsed.searchParams.get('provider') || '';
+        return {
+          ok: true,
+          status: 200,
+          json: async () => catalogModels.ngrok[provider] || [],
+          text: async () => ''
+        };
+      }
+
+      throw new Error(`Unexpected request: ${url}`);
+    };
+
+    const result = await fetchAiPoweredCatalogsFromCandidates({
+      baseUrls: resolveAiPoweredBaseUrlCandidates('api/ai-powered'),
+      fetchImpl
+    });
+
+    expect(result.catalogs).toHaveLength(2);
+    expect(result.providers).toHaveLength(4);
+    expect(result.models).toHaveLength(4);
+    expect(result.models.some((model) => model.baseUrl === 'api/ai-powered' && model.providerId === 'anthropic')).toBe(true);
+    expect(result.models.some((model) => model.baseUrl === AI_POWERED_NGROK_BASE_URL && model.providerId === 'xai')).toBe(true);
+
+    const selectionKey = buildAiPoweredSelectionKey({
+      baseUrl: AI_POWERED_NGROK_BASE_URL,
+      providerId: 'xai',
+      modelId: 'xai/grok-4'
+    });
+    expect(parseAiPoweredSelectionKey(selectionKey)).toEqual({
+      baseUrl: AI_POWERED_NGROK_BASE_URL,
+      providerId: 'xai',
+      modelId: 'xai/grok-4'
+    });
+
+    expect(requests).toEqual(expect.arrayContaining([
+      'api/ai-powered/health.php',
+      'api/ai-powered/providers.php',
+      'api/ai-powered/models.php?provider=anthropic&modality=text',
+      'api/ai-powered/models.php?provider=openai&modality=text',
+      `${AI_POWERED_NGROK_BASE_URL}/health`,
+      `${AI_POWERED_NGROK_BASE_URL}/providers`,
+      `${AI_POWERED_NGROK_BASE_URL}/models?provider=xai&modality=text`,
+      `${AI_POWERED_NGROK_BASE_URL}/models?provider=openrouter&modality=text`
+    ]));
   });
 
   it('prefers selected, cached, then heuristic AI-Powered models', () => {
     const models = [
       { id: 'openai/gpt-4.1-mini', name: 'GPT-4.1 Mini', capabilities: ['text'] },
       { id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4', capabilities: ['text', 'structured'] },
-      { id: 'runway/gen-4', name: 'Runway Gen-4', capabilities: ['video'] }
+      { id: 'runway/gen-4', name: 'Runway Gen-4', capabilities: ['video'] },
+      {
+        id: 'xai/grok-4',
+        name: 'Grok 4',
+        capabilities: ['text', 'structured'],
+        providerId: 'xai',
+        providerName: 'xAI / Grok',
+        baseUrl: AI_POWERED_NGROK_BASE_URL
+      },
+      {
+        id: 'xai/grok-4',
+        name: 'Grok 4',
+        capabilities: ['text', 'structured'],
+        providerId: 'xai',
+        providerName: 'xAI / Grok',
+        baseUrl: 'api/ai-powered'
+      }
     ];
 
     expect(resolvePreferredAiPoweredModel(models, {
@@ -107,7 +282,17 @@ describe('AI-Powered helpers', () => {
       reason: 'heuristic'
     });
 
+    expect(resolvePreferredAiPoweredModel(models, {
+      selectedModelId: 'xai/grok-4',
+      selectedProviderId: 'xai',
+      selectedBaseUrl: AI_POWERED_NGROK_BASE_URL
+    })).toMatchObject({
+      modelId: 'xai/grok-4',
+      reason: 'selected'
+    });
+
     expect(formatAiPoweredModelLabel(models[1])).toContain('Claude Sonnet 4');
     expect(formatAiPoweredModelLabel(models[1])).toContain('structured');
+    expect(formatAiPoweredModelLabel(models[3])).toContain('xAI / Grok');
   });
 });

@@ -535,7 +535,7 @@ function app_ollama_target_candidates(): array
 function app_proxy_ai_powered_endpoint(string $endpoint): void
 {
     $endpoint = trim($endpoint);
-    $allowed = ['health', 'models', 'stream'];
+    $allowed = ['health', 'providers', 'models', 'stream'];
     if ($endpoint === '' || !in_array($endpoint, $allowed, true)) {
         app_text('AI-Powered endpoint not found.', 404);
     }
@@ -736,7 +736,7 @@ function app_emit_ai_powered_proxy_headers(int $status, ?string $contentType, st
 
 function app_ai_powered_proxy_content_type(?string $contentType, string $endpoint): string
 {
-    $defaultContentType = in_array($endpoint, ['health', 'models'], true)
+    $defaultContentType = in_array($endpoint, ['health', 'providers', 'models'], true)
         ? 'application/json; charset=utf-8'
         : 'text/plain; charset=utf-8';
 

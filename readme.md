@@ -5,7 +5,7 @@
 <p>
   <strong>Browser-first transcription studio for constrained shared hosting.</strong><br />
   Whisper inference, audio decoding, transcript editing, and export generation all run in the browser.
-  Local AI summaries prefer Ollama through a same-origin PHP bridge, remember the chosen model and endpoint, and can fall back to a browser WASM model cache when Ollama is unavailable.
+  Local AI summaries prefer Ollama through a same-origin PHP bridge, can also discover AI-Powered provider catalogs from the bridge or a reachable public origin, remember the chosen model and endpoint, and can fall back to a browser WASM model cache when Ollama is unavailable.
   PHP stays small and only serves the shell, optional session protection, and optional host-side upload/download helpers.
 </p>
 
@@ -82,9 +82,12 @@ flowchart LR
   D --> F[Local AI panel]
   F --> G[Same-origin PHP Ollama bridge]
   G --> H[Ollama daemon]
-  F --> I[Browser WASM fallback]
-  A --> J[Optional PHP upload / download / session protection]
-  J --> K[Shared hosting storage]
+  F --> I[AI-Powered provider catalogs]
+  I --> J[Same-origin PHP AI-Powered bridge]
+  I --> K[Reachable public origin / ngrok tunnel]
+  I --> L[Browser WASM fallback]
+  A --> M[Optional PHP upload / download / session protection]
+  M --> N[Shared hosting storage]
 ```
 
 ## Key Stack
@@ -168,8 +171,8 @@ package.json
 3. Drop a file, click the drop zone to browse for one, or use `Record Mic` to capture audio from the microphone.
 4. Review a recording in the embedded player if you captured one.
 5. Pick the model, language, task, and cleanup options.
-6. Use the Local AI runtime mode selector to choose `Auto`, `Local only`, or `Browser only`.
-7. When Ollama is available, choose from the installed model list. The app remembers the endpoint, selected model, and last successful runtime.
+6. Use the Local AI runtime mode selector to choose `Auto`, `Local only`, `AI-Powered`, or `Browser only`.
+7. When Ollama or AI-Powered is available, choose from the available provider/model catalogs. The app remembers the endpoint, selected provider, selected model, and last successful runtime.
 8. Click `Transcribe`.
 9. Edit the transcript, generate a local AI summary if desired, and download TXT, SRT, VTT, or ZIP outputs.
 
@@ -181,7 +184,16 @@ package.json
 
 - `Auto` checks local Ollama first, then falls back to the browser WASM model cache if Ollama is unavailable or blocked.
 - `Local only` stays on Ollama and never switches to the browser runtime.
+- `AI-Powered` uses the provider catalogs from the same-origin bridge or a reachable public origin for summaries and chat.
 - `Browser only` uses the cached browser model and skips Ollama entirely.
+
+### AI-Powered Providers
+
+- The AI-Powered runtime loads provider catalogs from the same-origin PHP bridge in [`web/public/api/ai-powered/`](./web/public/api/ai-powered/) and from any reachable public origin, including the configured ngrok tunnel.
+- The provider/model picker groups results by endpoint so you can choose a specific provider and model pair for summaries and chat.
+- The browser stores the selected AI-Powered endpoint, provider, and model separately so the same choice is restored on reload.
+- If the `ai-powered` package is installed, the app uses its provider and model catalog APIs and streams summaries/chat through those provider-specific routes.
+- When a public origin is unavailable or returns no usable catalog, the app keeps using the same-origin bridge instead of breaking the transcription flow.
 
 ### Ollama Bridge
 
@@ -213,7 +225,7 @@ package.json
 ## Migration Notes
 
 - Existing users keep their transcription workflow and session data.
-- The app now persists `localAiBaseUrl`, `localAiModelName`, `localAiLastSuccessfulRuntime`, and `localAiLastSuccessfulRuntimeAt` in the settings snapshot.
+- The app now persists `localAiBaseUrl`, `localAiModelName`, `localAiLastSuccessfulRuntime`, `localAiLastSuccessfulRuntimeAt`, and the AI-Powered endpoint/provider/model fields in the settings snapshot.
 - First load after deployment may refresh the selected Ollama model if the previously selected one is no longer installed.
 - If you previously relied on direct loopback access, keep the PHP bridge deployed on the production host so the hosted origin can reach Ollama without CORS errors.
 
@@ -249,4 +261,5 @@ package.json
 - `npx playwright test tests/e2e/14-local-ai.spec.js`
 - Confirm the app loads, accepts audio/video, records from the microphone, transcribes, and downloads exports.
 - Confirm local AI can discover Ollama models, persist the selected model, and fall back to browser WASM when Ollama is blocked or unavailable.
+- Confirm AI-Powered provider catalogs render from the same-origin bridge and from a reachable public origin such as the ngrok tunnel.
 - Confirm the optional PHP shell still serves the built `index.html` and `assets/` bundle.

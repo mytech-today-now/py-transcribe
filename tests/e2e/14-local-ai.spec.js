@@ -1,5 +1,9 @@
 import { test, expect } from './fixtures.js';
 import {
+  AI_POWERED_NGROK_BASE_URL,
+  buildAiPoweredSelectionKey
+} from '../../web/lib/ai-powered.js';
+import {
   createAudioFile,
   installAiPoweredRoutes,
   installLocalAiRoutes,
@@ -68,17 +72,23 @@ test.describe('Local AI summary flows', () => {
     });
 
     await expect(page.locator('#aiRuntimeSelect')).toHaveValue('ai-powered');
-    await expect(page.locator('#aiRuntimeMeta')).toContainText(/ai-powered mode uses the local provider bridge/i);
+    await expect(page.locator('#aiRuntimeMeta')).toContainText(/ai-powered mode uses the local bridge/i);
     await expect(page.locator('#aiRuntimeMeta')).toContainText(/ai-powered endpoint: same-origin php bridge/i);
     await expect(page.locator('#aiState')).toContainText(/ai-powered detected/i);
-    await expect(page.locator('#aiModelLabel')).toHaveText('AI-Powered model');
-    await expect(page.locator('#aiModelSelect')).toHaveValue('anthropic/claude-sonnet-4');
-    await expect(page.locator('#aiModelMeta')).toContainText(/Claude Sonnet 4/i);
-    await expect(page.locator('#checkAiButton')).toHaveText(/refresh ai-powered models/i);
-    expect(requests.health).toHaveLength(1);
-    expect(requests.models).toHaveLength(1);
-    expect(requests.health[0].kind).toBe('proxy');
-    expect(requests.models[0].kind).toBe('proxy');
+    await expect(page.locator('#aiModelLabel')).toHaveText('AI-Powered provider/model');
+    await expect(page.locator('#aiModelSelect')).toHaveValue(buildAiPoweredSelectionKey({
+      baseUrl: 'api/ai-powered',
+      providerId: 'anthropic',
+      modelId: 'anthropic/claude-sonnet-4'
+    }));
+    await expect(page.locator('#aiModelMeta')).toContainText(/Anthropic/i);
+    await expect(page.locator('#aiModelMeta')).toContainText(/same-origin php bridge/i);
+    await expect(page.locator('#checkAiButton')).toHaveText(/refresh ai-powered providers/i);
+    expect(requests.health.some((request) => request.kind === 'proxy')).toBe(true);
+    expect(requests.providers).toHaveLength(1);
+    expect(requests.models).toHaveLength(2);
+    expect(requests.providers[0].kind).toBe('proxy');
+    expect(requests.models.every((request) => request.kind === 'proxy')).toBe(true);
 
     await selectFilesViaButton(page, [createAudioFile({ name: 'ai-powered.wav' })]);
     await loadRuntime(page);
@@ -101,9 +111,83 @@ test.describe('Local AI summary flows', () => {
     expect(requests.stream).toHaveLength(2);
     expect(requests.stream[0].phase).toBe('summary');
     expect(requests.stream[1].phase).toBe('chat');
+    expect(requests.stream.every((request) => request.kind === 'proxy' && request.postData.provider === 'anthropic')).toBe(true);
 
     const browserState = await page.evaluate(() => window.__pyTranscribeTestState.browserAi);
     expect(browserState.loadCalls).toBe(0);
+  });
+
+  test('integration: surfaces ngrok AI-Powered providers and can summarize/chat through the remote catalog', async ({ page }) => {
+    const requests = await installAiPoweredRoutes(page, {
+      ngrokHealthStatus: 200,
+      ngrokModelsStatus: 200,
+      ngrokStreamStatus: 200,
+      ngrokModels: [
+        {
+          id: 'xai/grok-4',
+          name: 'Grok 4',
+          capabilities: ['text', 'structured'],
+          providerId: 'xai',
+          providerName: 'xAI / Grok'
+        },
+        {
+          id: 'openrouter/qwen-3-coder',
+          name: 'Qwen 3 Coder',
+          capabilities: ['text'],
+          providerId: 'openrouter',
+          providerName: 'OpenRouter'
+        }
+      ],
+      ngrokSummaryChunks: [
+        'Ngrok summary.',
+        '\n- Remote provider.',
+        '\n- Action item.'
+      ],
+      ngrokChatChunks: [
+        'Ngrok reply.',
+        '\n- Remote provider.'
+      ]
+    });
+
+    await openApp(page, {
+      initialSettings: {
+        localAiRuntimeMode: 'ai-powered'
+      }
+    });
+
+    const groupLabels = await page.locator('#aiModelSelect optgroup').evaluateAll((groups) => groups.map((group) => group.label));
+    expect(groupLabels).toEqual(expect.arrayContaining(['same-origin PHP bridge', 'ngrok tunnel']));
+    await expect(page.locator('#aiModelSelect')).toContainText(/OpenRouter/i);
+    await expect(page.locator('#aiModelSelect')).toContainText(/xAI \/ Grok/i);
+
+    const remoteSelectionKey = buildAiPoweredSelectionKey({
+      baseUrl: AI_POWERED_NGROK_BASE_URL,
+      providerId: 'openrouter',
+      modelId: 'openrouter/qwen-3-coder'
+    });
+    await page.locator('#aiModelSelect').selectOption(remoteSelectionKey);
+    await expect(page.locator('#aiModelMeta')).toContainText(/OpenRouter/i);
+    await expect(page.locator('#aiModelMeta')).toContainText(/ngrok tunnel/i);
+
+    await selectFilesViaButton(page, [createAudioFile({ name: 'ngrok-ai-powered.wav' })]);
+    await loadRuntime(page);
+    await transcribeCurrentFile(page);
+
+    await expect(page.locator('#summarizeButton')).toBeEnabled();
+    await page.locator('#summaryDetailDetailed').check();
+    await page.locator('#summarizeButton').click();
+
+    await expect(page.locator('#summaryContent')).toContainText('Ngrok summary.');
+    await expect(page.locator('#summaryMeta')).toContainText('Model: Qwen 3 Coder');
+
+    await page.locator('#chatInput').fill('What remote provider was used?');
+    await page.locator('#chatSendButton').click();
+
+    await expect(page.locator('#chatHistory')).toContainText('Ngrok reply.');
+    expect(requests.providers.some((request) => request.source === 'ngrok tunnel')).toBe(true);
+    expect(requests.models.some((request) => request.source === 'ngrok tunnel')).toBe(true);
+    expect(requests.stream.some((request) => request.source === 'ngrok tunnel')).toBe(true);
+    expect(requests.stream.every((request) => request.postData.provider === 'openrouter')).toBe(true);
   });
 
   test('integration: falls back to browser WASM when the Ollama bridge is unavailable, then summarizes and chats locally', async ({ page }) => {
